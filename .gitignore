@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment
+.env
+
+# Logs
+app.log
+logs.json
+
+# Debug files
+debug_*.txt
+
+# Test files
+test_*.mp3
+test_*.py
+
+# Projects data (contains generated assets)
+projects/
+
+# Node
+node_modules/
