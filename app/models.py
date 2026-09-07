@@ -1,5 +1,5 @@
 """数据模型定义"""
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional
 from enum import Enum
 
@@ -41,6 +41,20 @@ class Shot(BaseModel):
     image_prompt: str = Field(default="", description="图像生成prompt")
     video_prompt: str = Field(default="", description="视频生成prompt")
     characters: list[str] = Field(default=[], description="画面中出现的角色名列表")
+    sound_effects: list = Field(default=[], description="音效标注列表，元素 {name,start,end,vol}")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_dialogue_to_list(cls, data):
+        """兼容旧数据：单数 dialogue 转 dialogues 数组"""
+        if isinstance(data, dict):
+            data = dict(data)
+            dlg = data.get("dialogue")
+            if dlg and isinstance(dlg, dict):
+                if not data.get("dialogues"):
+                    data["dialogues"] = [dlg]
+            data.pop("dialogue", None)
+        return data
 
 
 class Scene(BaseModel):
@@ -80,6 +94,7 @@ class CharacterViews(BaseModel):
 class ProjectCreate(BaseModel):
     name: str = Field(description="项目名称")
     novel_text: str = Field(description="小说文本")
+    use_tts: bool = Field(default=True, description="是否使用 TTS 配音（关则保留 AI 视频原声拼接）")
 
 
 class Project(BaseModel):
@@ -90,3 +105,4 @@ class Project(BaseModel):
     script: Optional[Script] = None
     characters: list[CharacterViews] = []
     error_message: str = ""
+    use_tts: bool = Field(default=True, description="是否使用 TTS 配音（关则保留 AI 视频原声拼接）")

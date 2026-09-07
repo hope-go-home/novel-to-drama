@@ -218,7 +218,8 @@ async def _merge_audio_files(audio_files: list[str], output_path: Path) -> str:
     concat_list.unlink(missing_ok=True)
 
     if result.returncode != 0:
-        # 回退：返回第一个音频
+        # 回退：返回第一个音频，但打印原因便于排查
+        print(f"音频合并失败，退回首段: {result.stderr[-200:]}")
         return audio_files[0]
 
     return str(output_path)
@@ -235,35 +236,44 @@ async def generate_shot_audio(
 
     result = {"dialogue_audio": None, "narrator_audio": None}
 
-    # 生成所有对话音频（支持多段对话）
+    # 生成所有对话音频（支持多段对话），单段也统一命名为 shot_{i}_dialogue.mp3
     if shot.dialogues:
-        dialogue_files = []
-        for j, dialogue in enumerate(shot.dialogues):
-            if not dialogue.line.strip():
-                continue
-            output_path = audio_dir / f"shot_{shot_index:04d}_dialogue_{j}.mp3"
-            if output_path.exists():
-                dialogue_files.append(str(output_path))
-            else:
-                voice_id = _assign_voice(dialogue.character, characters)
-                path = await _synthesize_speech(
-                    text=dialogue.line,
-                    voice_id=voice_id,
-                    emotion=dialogue.emotion,
-                    output_path=output_path,
-                )
-                dialogue_files.append(path)
+        final_dialogue = audio_dir / f"shot_{shot_index:04d}_dialogue.mp3"
+        speech = [d for d in shot.dialogues if d.line.strip()]
 
-        if dialogue_files:
-            # 如果有多段对话，合并成一个文件
-            if len(dialogue_files) == 1:
-                result["dialogue_audio"] = dialogue_files[0]
+        if len(speech) == 1:
+            # 单段：直接生成到统一命名文件
+            if final_dialogue.exists():
+                result["dialogue_audio"] = str(final_dialogue)
             else:
-                merged_path = audio_dir / f"shot_{shot_index:04d}_dialogue.mp3"
-                if merged_path.exists():
-                    result["dialogue_audio"] = str(merged_path)
-                else:
-                    result["dialogue_audio"] = await _merge_audio_files(dialogue_files, merged_path)
+                d = speech[0]
+                voice_id = _assign_voice(d.character, characters)
+                result["dialogue_audio"] = await _synthesize_speech(
+                    text=d.line,
+                    voice_id=voice_id,
+                    emotion=d.emotion,
+                    output_path=final_dialogue,
+                )
+        elif len(speech) > 1:
+            # 多段：逐段生成（可复用缓存），再合并
+            if final_dialogue.exists():
+                result["dialogue_audio"] = str(final_dialogue)
+            else:
+                dialogue_files = []
+                for j, d in enumerate(speech):
+                    seg_path = audio_dir / f"shot_{shot_index:04d}_dialogue_{j}.mp3"
+                    if seg_path.exists():
+                        dialogue_files.append(str(seg_path))
+                    else:
+                        voice_id = _assign_voice(d.character, characters)
+                        path = await _synthesize_speech(
+                            text=d.line,
+                            voice_id=voice_id,
+                            emotion=d.emotion,
+                            output_path=seg_path,
+                        )
+                        dialogue_files.append(path)
+                result["dialogue_audio"] = await _merge_audio_files(dialogue_files, final_dialogue)
 
     if shot.narrator and shot.narrator.strip():
         output_path = audio_dir / f"shot_{shot_index:04d}_narrator.mp3"

@@ -42,6 +42,26 @@
         </select>
       </div>
 
+      <!-- 声音方案 -->
+      <div class="form-section">
+        <label>声音方案</label>
+        <div class="tts-toggle">
+          <button
+            type="button"
+            :class="['btn', useTts ? 'btn-primary' : 'btn-ghost']"
+            @click="useTts = true"
+          >🎙 TTS 配音</button>
+          <button
+            type="button"
+            :class="['btn', !useTts ? 'btn-primary' : 'btn-ghost']"
+            @click="useTts = false"
+          >🎞 AI 原声拼接</button>
+        </div>
+        <p class="text-xs text-dim" style="margin-top:6px">
+          配音：角色对白 + 旁白（按角色固定音色），丢弃 AI 视频原声；原声拼接：保留 AI 视频自带声音直接连起来。之后可在项目页随时切换并重跑相关步骤。
+        </p>
+      </div>
+
       <div class="form-actions">
         <button
           class="btn btn-primary"
@@ -63,6 +83,7 @@ import { createProject, getProjects, importCharacters } from '../api'
 const router = useRouter()
 const name = ref('')
 const novelText = ref('')
+const useTts = ref(true)
 const submitting = ref(false)
 const existingProjects = ref([])
 const importFrom = ref('')
@@ -77,7 +98,7 @@ onMounted(async () => {
 const submit = async () => {
   submitting.value = true
   try {
-    const { data } = await createProject({ name: name.value.trim(), novel_text: novelText.value.trim() })
+    const { data } = await createProject({ name: name.value.trim(), novel_text: novelText.value.trim(), use_tts: useTts.value })
     const newId = data.project_id
 
     // 如果选择了复用角色
@@ -115,6 +136,9 @@ const submit = async () => {
 }
 
 .count-warn { color: var(--warning); }
+
+.tts-toggle { display: flex; gap: 8px; }
+.tts-toggle .btn { flex: 0 0 auto; }
 
 .form-actions {
   padding-top: 8px;

@@ -34,6 +34,20 @@ def _get_media_duration(media_path: str) -> float:
         return 3.0
 
 
+def _has_audio_stream(media_path: str) -> bool:
+    """探测媒体文件是否带音轨"""
+    if not media_path or not Path(media_path).exists():
+        return False
+    try:
+        result = subprocess.run(
+            [FFMPEG_PATH, "-i", media_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return any("Audio:" in line for line in result.stderr.split('\n'))
+    except Exception:
+        return False
+
+
 def _build_subtitle_text(shot: Shot) -> str:
     """构建字幕文本"""
     parts = []
@@ -61,10 +75,12 @@ async def compose_final_video(
     video_clip_paths: list[str],
     audio_paths: list[dict],
     project_dir: Path,
+    use_tts: bool = True,
 ) -> str:
     """
     合成最终视频。
-    优先使用 AI 视频片段，没有则用静态画面。
+    use_tts=True : 丢弃 AI 视频原声，只保留 TTS 对白/旁白 + 字幕
+    use_tts=False: 保留 AI 视频原画面与原声直接拼接，不叠加配音
     """
     output_dir = project_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -79,16 +95,27 @@ async def compose_final_video(
             continue
 
         audio_info = audio_paths[i] if i < len(audio_paths) else {}
-        dialogue_audio = audio_info.get("dialogue_audio")
-        narrator_audio = audio_info.get("narrator_audio")
+        if not use_tts:
+            # 原声模式：忽略配音，直接拼 AI 片段原声
+            dialogue_audio = None
+            narrator_audio = None
+        else:
+            dialogue_audio = audio_info.get("dialogue_audio")
+            narrator_audio = audio_info.get("narrator_audio")
 
-        # 确定时长（对话+旁白顺序播放，总时长 = 两者之和）
-        audio_duration = 0.0
-        if dialogue_audio:
-            audio_duration += _get_media_duration(dialogue_audio)
-        if narrator_audio:
-            audio_duration += _get_media_duration(narrator_audio)
-        duration = max(shot.duration, audio_duration)
+        # 确定时长
+        if use_tts:
+            # 对话+旁白顺序播放，总时长 = 两者之和，并覆盖镜头基础时长
+            audio_duration = 0.0
+            if dialogue_audio:
+                audio_duration += _get_media_duration(dialogue_audio)
+            if narrator_audio:
+                audio_duration += _get_media_duration(narrator_audio)
+            duration = max(shot.duration, audio_duration)
+        else:
+            # 原声模式：时长 = AI 视频自身长度（保留完整画面与声音），无视频则用镜头基础时长
+            video_len = _get_media_duration(video_source) if video_source else 0.0
+            duration = video_len if video_source else max(shot.duration, video_len)
 
         temp_output = output_dir / f"temp_clip_{i:04d}.mp4"
         subtitle_text = _build_subtitle_text(shot)
@@ -113,7 +140,7 @@ async def compose_final_video(
             video_duration = _get_media_duration(video_source)
             cmd.extend(["-i", video_source])
             video_label = "0:v"
-            has_video_audio = True
+            has_video_audio = _has_audio_stream(video_source)
             # 视频不够长时，冻结最后一帧延长（不循环播放）
             if video_duration < duration:
                 pad_time = duration - video_duration
@@ -128,11 +155,11 @@ async def compose_final_video(
         next_input_idx = 1
         dialogue_idx = None
         narrator_idx = None
-        if dialogue_audio:
+        if use_tts and dialogue_audio:
             dialogue_idx = next_input_idx
             cmd.extend(["-i", dialogue_audio])
             next_input_idx += 1
-        if narrator_audio:
+        if use_tts and narrator_audio:
             narrator_idx = next_input_idx
             cmd.extend(["-i", narrator_audio])
             next_input_idx += 1
@@ -144,20 +171,38 @@ async def compose_final_video(
         if narrator_idx is not None:
             voice_inputs.append(f"[{narrator_idx}:a]")
 
-        if voice_inputs:
-            # 有配音：抹掉视频原声，只用配音
-            if len(voice_inputs) == 1:
-                # 单个音频直接用
-                voice_filter = f"{voice_inputs[0]}atrim=0:{duration},asetpts=PTS-STARTPTS[outa]"
+        if not use_tts:
+            # 原声模式：直接取 AI 视频原音轨；无则静音
+            if has_video_audio:
+                audio_map = "0:a"
             else:
-                # 多个音频：对话优先，旁白跟在后面（先后播放，不混音）
-                # 先拼接：对话在前，旁白在后
-                joined = "".join(voice_inputs)
-                voice_filter = f"{joined}concat=n={len(voice_inputs)}:v=0:a=1[outa]"
+                cmd.extend(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
+                audio_map = f"{next_input_idx}:a"
+        elif voice_inputs:
+            # 配音模式：TTS 人声(对话1.0 / 旁白0.85) + AI 视频原声(环境音) 垫底
+            voice_labels = []
+            if dialogue_idx is not None:
+                filter_parts.append(
+                    f"[{dialogue_idx}:a]volume=1.0,atrim=0:{duration},asetpts=PTS-STARTPTS,"
+                    f"aformat=sample_rates=44100:channel_layouts=stereo[vd]"
+                )
+                voice_labels.append("[vd]")
+            if narrator_idx is not None:
+                filter_parts.append(
+                    f"[{narrator_idx}:a]volume=0.7,atrim=0:{duration},asetpts=PTS-STARTPTS,"
+                    f"aformat=sample_rates=44100:channel_layouts=stereo[vn]"
+                )
+                voice_labels.append("[vn]")
+            if len(voice_labels) == 1:
+                voice_filter = f"{voice_labels[0]}anull[voice]"
+            else:
+                joined = "".join(voice_labels)
+                voice_filter = f"{joined}concat=n={len(voice_labels)}:v=0:a=1[voice]"
             filter_parts.append(voice_filter)
-            audio_map = "[outa]"
+            # 配音镜头只放 TTS 人声，不掺 AI 原声（避免自带说话/环境与配音重叠）
+            audio_map = "[voice]"
         elif has_video_audio:
-            # 无配音：保留视频原声（环境音）
+            # 配音模式但该镜头无台词：保留视频原声（环境音）
             audio_map = "0:a"
         else:
             # 无任何音频：静音

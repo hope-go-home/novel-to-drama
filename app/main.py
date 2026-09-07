@@ -83,7 +83,7 @@ def _is_cancelled(project_id: str) -> bool:
 @app.post("/api/projects")
 async def create_project(req: ProjectCreate):
     project_id = str(uuid.uuid4())[:8]
-    project = Project(id=project_id, name=req.name, novel_text=req.novel_text)
+    project = Project(id=project_id, name=req.name, novel_text=req.novel_text, use_tts=req.use_tts)
     ensure_project_dir(project_id)
     _save_project(project)
     return {"project_id": project_id, "message": "项目创建成功"}
@@ -169,6 +169,16 @@ async def get_project(project_id: str):
     d["video_paths"] = [p if p and Path(p).exists() else None for p in video_paths]
     
     return d
+
+
+@app.post("/api/projects/{project_id}/settings")
+async def update_project_settings(project_id: str, body: dict):
+    """更新项目设置（当前仅 use_tts）"""
+    project = _load_project(project_id)
+    if "use_tts" in body:
+        project.use_tts = bool(body["use_tts"])
+    _save_project(project)
+    return {"use_tts": project.use_tts, "message": "设置已更新"}
 
 
 @app.delete("/api/projects/{project_id}")
@@ -586,7 +596,7 @@ async def _run_compose(project_id: str):
         final_video = await compose_final_video(
             shots=all_shots, shot_image_paths=image_paths,
             video_clip_paths=video_paths, audio_paths=audio_paths,
-            project_dir=OUTPUT_DIR / project_id,
+            project_dir=OUTPUT_DIR / project_id, use_tts=project.use_tts,
         )
         project.status = ProjectStatus.DONE
         _save_project(project)
@@ -637,8 +647,8 @@ async def _run_full_pipeline(project_id: str):
             project.status = ProjectStatus.SCRIPT_DONE
             _save_project(project)
 
-        # Step 2: 角色（已有则跳过）
-        if not project.characters:
+        # Step 2: 角色三视图（引擎按三视图文件缓存，缺则补生成）
+        if project.script:
             if _is_cancelled(project_id): return
             project.status = ProjectStatus.CHARACTERS_GENERATING
             _save_project(project)
@@ -674,48 +684,51 @@ async def _run_full_pipeline(project_id: str):
         else:
             image_paths = existing_images
 
-        # Step 4: 语音（已有则跳过）
-        existing_audio = _load_json(project_id, "audio_paths.json")
-        # 验证音频文件是否实际存在
-        if existing_audio:
-            valid_audio = []
-            for a in existing_audio:
-                if isinstance(a, dict):
-                    d_ok = a.get("dialogue_audio") and Path(a["dialogue_audio"]).exists()
-                    n_ok = a.get("narrator_audio") and Path(a["narrator_audio"]).exists()
-                    valid_audio.append({
-                        "dialogue_audio": a["dialogue_audio"] if d_ok else None,
-                        "narrator_audio": a["narrator_audio"] if n_ok else None,
-                    })
+        # Step 4: 语音（use_tts 开启才生成；关闭则走原声模式）
+        if project.use_tts:
+            existing_audio = _load_json(project_id, "audio_paths.json")
+            # 验证音频文件是否实际存在
+            if existing_audio:
+                valid_audio = []
+                for a in existing_audio:
+                    if isinstance(a, dict):
+                        d_ok = a.get("dialogue_audio") and Path(a["dialogue_audio"]).exists()
+                        n_ok = a.get("narrator_audio") and Path(a["narrator_audio"]).exists()
+                        valid_audio.append({
+                            "dialogue_audio": a["dialogue_audio"] if d_ok else None,
+                            "narrator_audio": a["narrator_audio"] if n_ok else None,
+                        })
+                    else:
+                        valid_audio.append(a)
+                # 检查是否所有需要音频的镜头都有音频
+                all_shots = _get_all_shots(project)
+                has_all = True
+                for i, shot in enumerate(all_shots):
+                    if i < len(valid_audio):
+                        need_d = shot.dialogues and any(d.line.strip() for d in shot.dialogues)
+                        need_n = shot.narrator and shot.narrator.strip()
+                        if need_d and not valid_audio[i].get("dialogue_audio"):
+                            has_all = False
+                        if need_n and not valid_audio[i].get("narrator_audio"):
+                            has_all = False
+                if has_all:
+                    audio_paths = valid_audio
                 else:
-                    valid_audio.append(a)
-            # 检查是否所有需要音频的镜头都有音频
-            all_shots = _get_all_shots(project)
-            has_all = True
-            for i, shot in enumerate(all_shots):
-                if i < len(valid_audio):
-                    need_d = shot.dialogues and any(d.line.strip() for d in shot.dialogues)
-                    need_n = shot.narrator and shot.narrator.strip()
-                    if need_d and not valid_audio[i].get("dialogue_audio"):
-                        has_all = False
-                    if need_n and not valid_audio[i].get("narrator_audio"):
-                        has_all = False
-            if has_all:
-                audio_paths = valid_audio
+                    existing_audio = None  # 有缺失，需要重新生成
+
+            if not existing_audio:
+                if _is_cancelled(project_id): return
+                project.status = ProjectStatus.AUDIO_GENERATING
+                _save_project(project)
+                all_shots = _get_all_shots(project)
+                audio_paths = await generate_all_audio(all_shots, project_dir, project.script.characters)
+                _save_json(project_id, "audio_paths.json", audio_paths)
+                project.status = ProjectStatus.AUDIO_DONE
+                _save_project(project)
             else:
-                existing_audio = None  # 有缺失，需要重新生成
-        
-        if not existing_audio:
-            if _is_cancelled(project_id): return
-            project.status = ProjectStatus.AUDIO_GENERATING
-            _save_project(project)
-            all_shots = _get_all_shots(project)
-            audio_paths = await generate_all_audio(all_shots, project_dir, project.script.characters)
-            _save_json(project_id, "audio_paths.json", audio_paths)
-            project.status = ProjectStatus.AUDIO_DONE
-            _save_project(project)
+                audio_paths = existing_audio
         else:
-            audio_paths = existing_audio
+            audio_paths = []  # 关闭配音：视频保留原声，不生成 TTS
 
         # Step 5: AI 视频（已有则跳过，失败则用空值）
         existing_video = _load_json(project_id, "video_paths.json")
@@ -756,7 +769,7 @@ async def _run_full_pipeline(project_id: str):
         final_video = await compose_final_video(
             shots=all_shots, shot_image_paths=image_paths,
             video_clip_paths=video_paths, audio_paths=audio_paths,
-            project_dir=project_dir,
+            project_dir=project_dir, use_tts=project.use_tts,
         )
         project.status = ProjectStatus.DONE
         _save_project(project)

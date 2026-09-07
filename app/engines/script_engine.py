@@ -1,6 +1,7 @@
 """剧本改写引擎 - 小说文本 → 结构化分镜剧本
 使用豆包方舟平台 LLM
 """
+import asyncio
 import json
 import httpx
 from ..config import ARK_API_KEY, ARK_BASE_URL, LLM_MODEL
@@ -31,13 +32,25 @@ async def generate_script(novel_text: str) -> Script:
         "max_tokens": 8000,
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(
-            f"{ARK_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
+    # 超时拉长 + 自动重试（LLM 生成长文本有时超过 120s，或网络瞬时抖动）
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        last_err = None
+        for attempt in range(3):
+            try:
+                response = await client.post(
+                    f"{ARK_BASE_URL}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                break
+            except httpx.HTTPError as e:
+                last_err = e
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(3 * (attempt + 1))
+        else:
+            raise last_err
 
     result = response.json()
     content = result["choices"][0]["message"]["content"]

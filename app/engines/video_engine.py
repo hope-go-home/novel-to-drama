@@ -43,15 +43,42 @@ def _get_media_duration(media_path: str) -> float:
 
 
 def build_video_prompt(shot: Shot) -> str:
-    """构建视频生成 prompt（wan2.7-r2v 用参考图，prompt 用 Image 1 指代参考图）"""
+    """构建视频生成 prompt（用场景图作首帧，注入台词/情绪/动作，并保证角色形象一致）"""
     parts = []
     # 参考图指代
     parts.append("Based on the scene in Image 1")
 
     if shot.video_prompt:
         parts.append(shot.video_prompt)
-    else:
+    elif shot.description:
         parts.append(shot.description)
+
+    # 台词/动作注入 + 角色一致性提示
+    lines = shot.dialogues or []
+    has_speech = any(d.line.strip() for d in lines)
+    if has_speech:
+        parts.append("Keep every character's appearance and voice exactly identical to their established look in previous scenes")
+        for d in lines:
+            if d.line.strip():
+                line = d.line.strip()
+                emotion = d.emotion or "平静"
+                action = f", {d.action.strip()}" if d.action and d.action.strip() else ""
+                parts.append(
+                    f'Character {d.character} mouths the line silently: "{line}" '
+                    f"with a {emotion} facial expression and lip movement only{action}"
+                )
+        # 对白由后期 TTS 配音提供，禁止视频自带任何人声/朗读声
+        parts.append(
+            "The dialogue is dubbed later; generate NO audible speech, no vocals, "
+            "no English or any language narration audio, no mouthing sounds. "
+            "Audio track (if any) should contain only ambient/environmental sound effects such as wind, footsteps or background noise."
+        )
+    elif shot.narrator and shot.narrator.strip():
+        parts.append(
+            "No character speaks aloud or mouths anything; this scene is silent, "
+            "its narration is added later as voice-over. "
+            "Audio track (if any) should contain only ambient/environmental sound effects, no speech or vocals."
+        )
 
     camera_map = {
         "推": "slow zoom in",
@@ -182,22 +209,27 @@ async def generate_video_clips(
             results.append(str(output_path))
             continue
 
-        # 计算视频时长：根据配音时长，无配音则4-6秒
+        # 计算视频时长：有配音则 = max(镜头基础时长, 对白+旁白总时长)，与合成对齐；无配音 4-6 秒
         import random
-        audio_duration = 0.0
+        dialogue_dur = 0.0
+        narrator_dur = 0.0
         if audio_paths and i < len(audio_paths):
-            audio_info = audio_paths[i]
+            audio_info = audio_paths[i] or {}
             d = audio_info.get("dialogue_audio")
             n = audio_info.get("narrator_audio")
             if d:
-                audio_duration = max(audio_duration, _get_media_duration(d))
+                dialogue_dur = _get_media_duration(d)
             if n:
-                audio_duration = max(audio_duration, _get_media_duration(n))
+                narrator_dur = _get_media_duration(n)
 
-        if audio_duration > 0:
-            duration = int(audio_duration)
+        voice_total = dialogue_dur + narrator_dur
+        if voice_total > 0:
+            duration = int(max(float(shot.duration or 3.0), voice_total))
         else:
             duration = random.randint(4, 6)
+
+        # 单镜视频硬上限 10 秒；更长的配音/旁白在合成阶段用冻结末帧延展
+        duration = max(2, min(duration, 10))
 
         prompt = build_video_prompt(shot)
 
@@ -206,7 +238,7 @@ async def generate_video_clips(
             result = await _generate_video_clip(
                 image_path=image_path,
                 prompt=prompt,
-                duration=int(audio_duration),
+                duration=duration,
                 output_path=output_path,
             )
             results.append(result)

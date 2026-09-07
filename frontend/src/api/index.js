@@ -11,6 +11,7 @@ export const createProject = (data) => api.post('/projects', data)
 export const getProject = (id) => api.get(`/projects/${id}`)
 export const deleteProject = (id) => api.delete(`/projects/${id}`)
 export const getResult = (id) => api.get(`/projects/${id}/result`)
+export const updateProjectSettings = (id, data) => api.post(`/projects/${id}/settings`, data)
 
 // 日志
 export const getLogs = (limit = 100, projectId = '') => api.get('/logs', { params: { limit, project_id: projectId } })

@@ -85,6 +85,8 @@ def build_shot_image_prompt(
     if shot.shot_type in shot_type_map:
         prompt_parts.append(shot_type_map[shot.shot_type])
 
+    # 16:9 横向构图，与 AI 视频画幅一致，作首帧不变形
+    prompt_parts.append("horizontal 16:9 wide composition, landscape aspect ratio")
     prompt_parts.append("masterpiece, best quality, highly detailed, cinematic lighting")
     return ", ".join(prompt_parts)
 

@@ -7,6 +7,10 @@
         <p class="text-xs text-dim" style="margin-top:2px">{{ $route.params.id }}</p>
       </div>
       <div class="header-actions">
+        <div class="tts-seg" title="声音方案：配音=角色TTS对白+旁白并丢视频原声；原声=保留AI视频自带声音拼接">
+          <button class="btn btn-xs" :class="project.use_tts !== false ? 'btn-primary' : 'btn-ghost'" :disabled="running" @click="handleToggleTts(true)">TTS 配音</button>
+          <button class="btn btn-xs" :class="project.use_tts === false ? 'btn-primary' : 'btn-ghost'" :disabled="running" @click="handleToggleTts(false)">AI 原声</button>
+        </div>
         <button v-if="!running" class="btn btn-primary" @click="startFull">一键生成</button>
         <button v-if="running" class="btn btn-outline" @click="handleStop" style="color:var(--error);border-color:var(--error)">停止</button>
         <router-link to="/" class="btn btn-outline btn-sm">返回</router-link>
@@ -92,6 +96,13 @@
                   <div v-if="shot.narrator" class="shot-narrator">
                     <span class="narrator-label">旁白</span> {{ shot.narrator }}
                   </div>
+                  <div v-if="shot.duration" class="shot-duration">
+                    <span class="duration-label">时长</span> {{ shot.duration }}s
+                  </div>
+                  <div v-if="shot.sound_effects?.length" class="shot-sfx">
+                    <span class="sfx-label">音效</span>
+                    <span v-for="(s, si) in shot.sound_effects" :key="si" class="sfx-item">{{ s.name }}({{ s.start }}–{{ s.end }}s, {{ s.vol }})</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -138,7 +149,7 @@
         <div class="shot-grid">
           <div v-for="(src, i) in shotImages" :key="i" class="shot-card">
             <div v-if="src" @click="lightbox = img(src)">
-              <img :src="img(src)" :alt=`镜头 ${i+1}` />
+                <img :src="img(src)" :alt="'镜头 ' + (i+1)" />
               <div class="shot-label">{{ i + 1 }}</div>
             </div>
             <div v-else class="shot-empty">
@@ -202,7 +213,7 @@
       </section>
 
       <!-- 最终视频 -->
-      <section v-if="project.status === 'done' || finalVideoUrl" class="section">
+      <section v-if="finalVideoUrl" class="section">
         <div class="section-header">
           <h2 class="section-title">最终视频</h2>
           <button class="btn btn-danger btn-xs" @click="handleDeleteOutput">删除</button>
@@ -217,14 +228,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   getProject, generateAll, getResult, stopProject,
   generateScript, generateCharacters, generateShots,
   generateAudio, generateVideos, composeVideo,
   deleteScript, deleteCharacters, deleteShots, deleteAudio,
-  deleteVideos, deleteOutput, deleteSingleShot, deleteSingleVideo
+  deleteVideos, deleteOutput, deleteSingleShot, deleteSingleVideo,
+  updateProjectSettings
 } from '../api'
 import { getLogs, clearLogs } from '../api'
 import LogPanel from '../components/LogPanel.vue'
@@ -242,7 +254,7 @@ const logs = ref([])
 let pollTimer = null
 let logTimer = null
 
-const steps = [
+const ALL_STEPS = [
   { key: 'script', label: '剧本改写' },
   { key: 'characters', label: '角色设计' },
   { key: 'shots', label: '分镜画面' },
@@ -250,10 +262,19 @@ const steps = [
   { key: 'video', label: 'AI 视频' },
   { key: 'compose', label: '最终合成' },
 ]
+// AI 原声模式（use_tts=false）不生成配音，流程里就不显示"语音合成"
+const steps = computed(() => {
+  const all = ALL_STEPS
+  return project.value.use_tts !== false ? all : all.filter(s => s.key !== 'audio')
+})
 
 const stepStatus = (key) => {
   const s = project.value.status || ''
-  const order = ['script', 'characters', 'shots', 'audio', 'video', 'compose', 'done']
+  const prefix = ['script', 'characters', 'shots']
+  const suffix = ['video', 'compose', 'done']
+  const order = project.value.use_tts !== false
+    ? [...prefix, 'audio', ...suffix]
+    : [...prefix, ...suffix]
   const cur = order.findIndex(k => s.includes(k))
   const idx = order.indexOf(key)
   if (s === 'done') return idx <= cur ? 'done' : 'pending'
@@ -289,12 +310,12 @@ const loadProject = async () => {
     shotImages.value = data.shot_images || []
     audioPaths.value = data.audio_paths || []
     videoPaths.value = data.video_paths || []
-    // 加载最终视频
-    if (data.status === 'done') {
-      try {
-        const { data: r } = await getResult(route.params.id)
-        finalVideoUrl.value = img(r.video_path)
-      } catch (e) {}
+    // 加载最终视频（只要有 result 文件就显示，不依赖 status）
+    try {
+      const { data: r } = await getResult(route.params.id)
+      finalVideoUrl.value = img(r.video_path)
+    } catch (e) {
+      finalVideoUrl.value = ''
     }
   } catch (e) { console.error(e) }
 }
@@ -313,7 +334,7 @@ const rerunStep = async (key) => {
     alert('当前有任务正在运行，请先停止或等待完成')
     return
   }
-  if (!confirm(`重跑「${steps.find(s => s.key === key)?.label}」？`)) return
+  if (!confirm(`重跑「${steps.value.find(s => s.key === key)?.label}」？`)) return
   running.value = true
   try {
     await stepApi[key](route.params.id)
@@ -388,6 +409,21 @@ const handleDeleteOutput = async () => {
   await loadProject()
 }
 
+const handleToggleTts = async (val) => {
+  if (running.value) {
+    alert('请先停止当前任务再切换声音方案')
+    return
+  }
+  const label = val ? 'TTS 配音' : 'AI 原声拼接'
+  if (!confirm(`切换到「${label}」？\n提示：切换后需删除已生成的音频/视频并重跑，新方案才生效。`)) return
+  try {
+    await updateProjectSettings(route.params.id, { use_tts: val })
+    await loadProject()
+  } catch (e) {
+    alert('切换失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
 const handleDeleteSingleShot = async (index) => {
   if (!confirm(`确定删除分镜 ${index + 1}？`)) return
   await deleteSingleShot(route.params.id, index)
@@ -456,7 +492,9 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 </script>
 
 <style scoped>
-.header-actions { display: flex; gap: 8px; }
+.header-actions { display: flex; gap: 8px; align-items: center; }
+.tts-seg { display: inline-flex; gap: 4px; border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+.tts-seg .btn { padding: 3px 10px; font-size: 11px; }
 
 /* 流水线 */
 .pipeline {
@@ -652,6 +690,37 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   color: var(--text-dim);
   font-weight: 600;
   font-style: normal;
+}
+
+.shot-duration {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.duration-label {
+  color: var(--primary);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.shot-sfx {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.sfx-label {
+  color: var(--warning);
+  font-weight: 600;
+}
+.sfx-item {
+  background: var(--bg-hover);
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 10px;
 }
 
 /* 角色 */
