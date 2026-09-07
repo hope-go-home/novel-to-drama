@@ -27,4 +27,14 @@ export const generateAudio = (id) => api.post(`/projects/${id}/generate-audio`)
 export const generateVideos = (id) => api.post(`/projects/${id}/generate-videos`)
 export const composeVideo = (id) => api.post(`/projects/${id}/compose`)
 
+// 删除资产
+export const deleteScript = (id) => api.delete(`/projects/${id}/script`)
+export const deleteCharacters = (id) => api.delete(`/projects/${id}/characters`)
+export const deleteShots = (id) => api.delete(`/projects/${id}/shots`)
+export const deleteAudio = (id) => api.delete(`/projects/${id}/audio`)
+export const deleteVideos = (id) => api.delete(`/projects/${id}/videos`)
+export const deleteOutput = (id) => api.delete(`/projects/${id}/output`)
+export const deleteSingleShot = (id, index) => api.delete(`/projects/${id}/shot/${index}`)
+export const deleteSingleVideo = (id, index) => api.delete(`/projects/${id}/video/${index}`)
+
 export default api

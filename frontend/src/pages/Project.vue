@@ -45,7 +45,10 @@
 
       <!-- 剧本 -->
       <section v-if="project.script" class="section">
-        <h2 class="section-title">剧本</h2>
+        <div class="section-header">
+          <h2 class="section-title">剧本</h2>
+          <button class="btn btn-danger btn-xs" @click="handleDeleteScript">删除剧本</button>
+        </div>
 
         <div class="script-meta">
           <div class="meta-item">
@@ -78,10 +81,16 @@
                     <span class="shot-type">{{ shot.shot_type }}</span>
                     {{ shot.description }}
                   </div>
-                  <div v-if="shot.dialogue" class="shot-dialogue">
-                    <span class="dialogue-char">{{ shot.dialogue.character }}</span>
-                    <span class="dialogue-line">「{{ shot.dialogue.line }}」</span>
-                    <span class="dialogue-emotion">{{ shot.dialogue.emotion }}</span>
+                  <!-- 适配 dialogues 数组 -->
+                  <template v-if="shot.dialogues?.length">
+                    <div v-for="(d, di) in shot.dialogues" :key="di" class="shot-dialogue">
+                      <span class="dialogue-char">{{ d.character }}</span>
+                      <span class="dialogue-line">「{{ d.line }}」</span>
+                      <span class="dialogue-emotion">{{ d.emotion }}</span>
+                    </div>
+                  </template>
+                  <div v-if="shot.narrator" class="shot-narrator">
+                    <span class="narrator-label">旁白</span> {{ shot.narrator }}
                   </div>
                 </div>
               </div>
@@ -92,7 +101,10 @@
 
       <!-- 角色 -->
       <section v-if="project.characters?.length" class="section">
-        <h2 class="section-title">角色设计</h2>
+        <div class="section-header">
+          <h2 class="section-title">角色设计</h2>
+          <button class="btn btn-danger btn-xs" @click="handleDeleteCharacters">删除角色</button>
+        </div>
         <div class="char-grid">
           <div v-for="char in project.characters" :key="char.character_name" class="char-card">
             <div class="char-info">
@@ -117,13 +129,23 @@
         </div>
       </section>
 
-      <!-- 分镜 -->
+      <!-- 分镜画面 -->
       <section v-if="shotImages.length" class="section">
-        <h2 class="section-title">分镜画面</h2>
+        <div class="section-header">
+          <h2 class="section-title">分镜画面</h2>
+          <button class="btn btn-danger btn-xs" @click="handleDeleteShots">全部删除</button>
+        </div>
         <div class="shot-grid">
-          <div v-for="(src, i) in shotImages" :key="i" class="shot-card" @click="lightbox = img(src)">
-            <img :src="img(src)" :alt="`镜头 ${i+1}`" />
-            <div class="shot-label">{{ i + 1 }}</div>
+          <div v-for="(src, i) in shotImages" :key="i" class="shot-card">
+            <div v-if="src" @click="lightbox = img(src)">
+              <img :src="img(src)" :alt=`镜头 ${i+1}` />
+              <div class="shot-label">{{ i + 1 }}</div>
+            </div>
+            <div v-else class="shot-empty">
+              <span>{{ i + 1 }}</span>
+              <span class="text-xs">无画面</span>
+            </div>
+            <button v-if="src" class="delete-badge" @click.stop="handleDeleteSingleShot(i)" title="删除">✕</button>
           </div>
         </div>
       </section>
@@ -135,7 +157,10 @@
 
       <!-- 语音 -->
       <section v-if="audioPaths.length" class="section">
-        <h2 class="section-title">语音</h2>
+        <div class="section-header">
+          <h2 class="section-title">语音</h2>
+          <button class="btn btn-danger btn-xs" @click="handleDeleteAudio">全部删除</button>
+        </div>
         <div class="audio-list">
           <template v-for="(a, i) in audioPaths" :key="i">
             <div v-if="a.dialogue_audio || a.narrator_audio" class="audio-row">
@@ -155,12 +180,36 @@
         </div>
       </section>
 
+      <!-- AI 视频片段 -->
+      <section v-if="videoPaths.length" class="section">
+        <div class="section-header">
+          <h2 class="section-title">AI 视频片段</h2>
+          <button class="btn btn-danger btn-xs" @click="handleDeleteVideos">全部删除</button>
+        </div>
+        <div class="video-grid">
+          <div v-for="(src, i) in videoPaths" :key="i" class="video-card">
+            <div v-if="src" class="video-wrap">
+              <video controls :src="img(src)" preload="metadata" />
+              <div class="video-label">{{ i + 1 }}</div>
+            </div>
+            <div v-else class="video-empty">
+              <span>{{ i + 1 }}</span>
+              <span class="text-xs">无视频</span>
+            </div>
+            <button v-if="src" class="delete-badge" @click="handleDeleteSingleVideo(i)" title="删除">✕</button>
+          </div>
+        </div>
+      </section>
+
       <!-- 最终视频 -->
-      <section v-if="project.status === 'done'" class="section">
-        <h2 class="section-title">最终视频</h2>
-        <div v-if="videoUrl" class="video-area">
-          <video controls :src="videoUrl" />
-          <a :href="videoUrl" download class="btn btn-outline mt-2">下载视频</a>
+      <section v-if="project.status === 'done' || finalVideoUrl" class="section">
+        <div class="section-header">
+          <h2 class="section-title">最终视频</h2>
+          <button class="btn btn-danger btn-xs" @click="handleDeleteOutput">删除</button>
+        </div>
+        <div v-if="finalVideoUrl" class="video-area">
+          <video controls :src="finalVideoUrl" />
+          <a :href="finalVideoUrl" download class="btn btn-outline mt-2">下载视频</a>
         </div>
       </section>
     </div>
@@ -173,7 +222,9 @@ import { useRoute } from 'vue-router'
 import {
   getProject, generateAll, getResult, stopProject,
   generateScript, generateCharacters, generateShots,
-  generateAudio, generateVideos, composeVideo
+  generateAudio, generateVideos, composeVideo,
+  deleteScript, deleteCharacters, deleteShots, deleteAudio,
+  deleteVideos, deleteOutput, deleteSingleShot, deleteSingleVideo
 } from '../api'
 import { getLogs, clearLogs } from '../api'
 import LogPanel from '../components/LogPanel.vue'
@@ -181,9 +232,10 @@ import LogPanel from '../components/LogPanel.vue'
 const route = useRoute()
 const project = ref({})
 const running = ref(false)
-const videoUrl = ref('')
+const finalVideoUrl = ref('')
 const shotImages = ref([])
 const audioPaths = ref([])
+const videoPaths = ref([])
 const expandedScenes = reactive({})
 const lightbox = ref(null)
 const logs = ref([])
@@ -223,7 +275,6 @@ const img = (path) => {
   if (!path) return ''
   const m = path.match(/projects[/\\](.+)/)
   if (m) {
-    // 对中文路径进行编码
     const parts = m[1].replace(/\\/g, '/').split('/')
     const encoded = parts.map(p => encodeURIComponent(p)).join('/')
     return `/static/projects/${encoded}`
@@ -237,6 +288,14 @@ const loadProject = async () => {
     project.value = data
     shotImages.value = data.shot_images || []
     audioPaths.value = data.audio_paths || []
+    videoPaths.value = data.video_paths || []
+    // 加载最终视频
+    if (data.status === 'done') {
+      try {
+        const { data: r } = await getResult(route.params.id)
+        finalVideoUrl.value = img(r.video_path)
+      } catch (e) {}
+    }
   } catch (e) { console.error(e) }
 }
 
@@ -258,7 +317,6 @@ const rerunStep = async (key) => {
   running.value = true
   try {
     await stepApi[key](route.params.id)
-    // 立即刷新一次状态
     await loadProject()
     startPolling()
   } catch (e) {
@@ -282,7 +340,6 @@ const handleStop = async () => {
   if (!confirm('确定停止当前生成？')) return
   try {
     await stopProject(route.params.id)
-    // 立即更新状态
     running.value = false
     if (pollTimer) clearInterval(pollTimer)
     if (logTimer) clearInterval(logTimer)
@@ -291,6 +348,56 @@ const handleStop = async () => {
   } catch (e) {
     alert('停止失败: ' + (e.response?.data?.detail || e.message))
   }
+}
+
+// 删除操作
+const handleDeleteScript = async () => {
+  if (!confirm('确定删除剧本？这将同时删除分镜、语音、视频')) return
+  await deleteScript(route.params.id)
+  await loadProject()
+}
+
+const handleDeleteCharacters = async () => {
+  if (!confirm('确定删除角色设计？')) return
+  await deleteCharacters(route.params.id)
+  await loadProject()
+}
+
+const handleDeleteShots = async () => {
+  if (!confirm('确定删除所有分镜画面？')) return
+  await deleteShots(route.params.id)
+  await loadProject()
+}
+
+const handleDeleteAudio = async () => {
+  if (!confirm('确定删除所有语音？')) return
+  await deleteAudio(route.params.id)
+  await loadProject()
+}
+
+const handleDeleteVideos = async () => {
+  if (!confirm('确定删除所有视频片段？')) return
+  await deleteVideos(route.params.id)
+  await loadProject()
+}
+
+const handleDeleteOutput = async () => {
+  if (!confirm('确定删除最终视频？')) return
+  await deleteOutput(route.params.id)
+  finalVideoUrl.value = ''
+  await loadProject()
+}
+
+const handleDeleteSingleShot = async (index) => {
+  if (!confirm(`确定删除分镜 ${index + 1}？`)) return
+  await deleteSingleShot(route.params.id, index)
+  await loadProject()
+}
+
+const handleDeleteSingleVideo = async (index) => {
+  if (!confirm(`确定删除视频片段 ${index + 1}？`)) return
+  await deleteSingleVideo(route.params.id, index)
+  await loadProject()
 }
 
 const loadLogs = async () => {
@@ -315,7 +422,6 @@ const startPolling = () => {
     await loadProject()
     await loadLogs()
     const s = project.value.status
-    // 如果是终态（完成、错误、或某个步骤完成），停止轮询
     const isTerminal = s === 'done' || s === 'error' || s === 'created' || s.endsWith('_done')
     if (isTerminal) {
       clearInterval(pollTimer)
@@ -324,15 +430,13 @@ const startPolling = () => {
       if (s === 'done') {
         try {
           const { data } = await getResult(route.params.id)
-          videoUrl.value = img(data.video_path)
+          finalVideoUrl.value = img(data.video_path)
         } catch (e) {}
       }
     }
   }
 
-  // 立即检查一次
   checkStatus()
-  // 然后每3秒检查一次
   pollTimer = setInterval(checkStatus, 3000)
   logTimer = setInterval(loadLogs, 2000)
 }
@@ -341,7 +445,6 @@ onMounted(async () => {
   await loadProject()
   await loadLogs()
   const s = project.value.status
-  // 如果正在生成中（状态包含 generating 或 composing），启动轮询
   const isRunning = s && (s.includes('generating') || s === 'composing')
   if (isRunning) {
     running.value = true
@@ -423,14 +526,35 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 /* 内容区 */
 .sections { display: flex; flex-direction: column; gap: 28px; }
 
-.section-title {
-  font-family: var(--font-display);
-  font-size: 17px;
-  font-weight: 700;
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   margin-bottom: 16px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
 }
+
+.section-title {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.btn-danger {
+  background: var(--error-bg);
+  color: var(--error);
+  border: 1px solid #FECACA;
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-danger:hover { background: #FEE2E2; }
+
+.btn-xs { font-size: 11px; padding: 3px 10px; }
 
 /* 剧本 */
 .script-meta {
@@ -517,6 +641,19 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .dialogue-line { margin: 0 4px; }
 .dialogue-emotion { font-style: italic; }
 
+.shot-narrator {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-light);
+  font-style: italic;
+}
+.narrator-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 600;
+  font-style: normal;
+}
+
 /* 角色 */
 .char-grid { display: flex; flex-direction: column; gap: 16px; }
 
@@ -563,7 +700,9 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   overflow: hidden;
   border: 1px solid var(--border);
   aspect-ratio: 16/9;
+  cursor: pointer;
 }
+.shot-card:hover { opacity: 0.85; }
 .shot-card img {
   width: 100%;
   height: 100%;
@@ -579,6 +718,80 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   font-size: 11px;
   padding: 1px 7px;
   border-radius: 100px;
+}
+.shot-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background: var(--bg-hover);
+  color: var(--text-light);
+}
+
+.delete-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.7);
+  color: white;
+  border: none;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.shot-card:hover .delete-badge,
+.video-card:hover .delete-badge { opacity: 1; }
+.delete-badge:hover { background: var(--error); }
+
+/* 视频片段 */
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.video-card {
+  position: relative;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.video-wrap {
+  position: relative;
+}
+.video-wrap video {
+  width: 100%;
+  display: block;
+  aspect-ratio: 16/9;
+  object-fit: cover;
+  background: #000;
+}
+.video-label {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  background: rgba(0,0,0,0.65);
+  color: white;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 100px;
+}
+.video-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 140px;
+  background: var(--bg-hover);
+  color: var(--text-light);
 }
 
 /* 语音 */
@@ -606,7 +819,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .audio-label { font-size: 11px; color: var(--text-dim); }
 .audio-item audio { height: 30px; }
 
-/* 视频 */
+/* 最终视频 */
 .video-area { text-align: center; }
 .video-area video {
   max-width: 100%;
@@ -630,7 +843,4 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   max-height: 90vh;
   border-radius: var(--radius);
 }
-
-.shot-card { cursor: pointer; }
-.shot-card:hover { opacity: 0.85; }
 </style>

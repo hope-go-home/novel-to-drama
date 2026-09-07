@@ -180,6 +180,116 @@ async def delete_project(project_id: str):
     return {"message": "项目已删除"}
 
 
+@app.delete("/api/projects/{project_id}/script")
+async def delete_script(project_id: str):
+    """删除剧本"""
+    project = _load_project(project_id)
+    project.script = None
+    project.status = ProjectStatus.CREATED
+    _save_project(project)
+    # 删除相关文件
+    for f in ["shot_images.json", "audio_paths.json", "video_paths.json"]:
+        p = OUTPUT_DIR / project_id / f
+        if p.exists():
+            p.unlink()
+    return {"message": "剧本已删除"}
+
+
+@app.delete("/api/projects/{project_id}/characters")
+async def delete_characters(project_id: str):
+    """删除角色设计"""
+    project = _load_project(project_id)
+    project.characters = []
+    _save_project(project)
+    char_dir = OUTPUT_DIR / project_id / "characters"
+    if char_dir.exists():
+        shutil.rmtree(char_dir)
+    return {"message": "角色设计已删除"}
+
+
+@app.delete("/api/projects/{project_id}/shots")
+async def delete_shots(project_id: str):
+    """删除分镜画面"""
+    _load_project(project_id)
+    shots_dir = OUTPUT_DIR / project_id / "shots"
+    if shots_dir.exists():
+        shutil.rmtree(shots_dir)
+        shots_dir.mkdir()
+    p = OUTPUT_DIR / project_id / "shot_images.json"
+    if p.exists():
+        p.unlink()
+    return {"message": "分镜画面已删除"}
+
+
+@app.delete("/api/projects/{project_id}/audio")
+async def delete_audio(project_id: str):
+    """删除语音"""
+    _load_project(project_id)
+    audio_dir = OUTPUT_DIR / project_id / "audio"
+    if audio_dir.exists():
+        shutil.rmtree(audio_dir)
+        audio_dir.mkdir()
+    p = OUTPUT_DIR / project_id / "audio_paths.json"
+    if p.exists():
+        p.unlink()
+    return {"message": "语音已删除"}
+
+
+@app.delete("/api/projects/{project_id}/videos")
+async def delete_videos(project_id: str):
+    """删除视频片段"""
+    _load_project(project_id)
+    clips_dir = OUTPUT_DIR / project_id / "video_clips"
+    if clips_dir.exists():
+        shutil.rmtree(clips_dir)
+        clips_dir.mkdir()
+    p = OUTPUT_DIR / project_id / "video_paths.json"
+    if p.exists():
+        p.unlink()
+    return {"message": "视频片段已删除"}
+
+
+@app.delete("/api/projects/{project_id}/output")
+async def delete_output(project_id: str):
+    """删除最终合成视频"""
+    _load_project(project_id)
+    output_dir = OUTPUT_DIR / project_id / "output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+        output_dir.mkdir()
+    return {"message": "最终视频已删除"}
+
+
+@app.delete("/api/projects/{project_id}/shot/{index}")
+async def delete_single_shot(project_id: str, index: int):
+    """删除单张分镜画面"""
+    _load_project(project_id)
+    shot_path = OUTPUT_DIR / project_id / "shots" / f"shot_{index:04d}.png"
+    if shot_path.exists():
+        shot_path.unlink()
+    # 更新 shot_images.json
+    images = _load_json(project_id, "shot_images.json") or []
+    if index < len(images):
+        images[index] = None
+        _save_json(project_id, "shot_images.json", images)
+    return {"message": f"分镜 {index} 已删除"}
+
+
+@app.delete("/api/projects/{project_id}/video/{index}")
+async def delete_single_video(project_id: str, index: int):
+    """删除单个视频片段"""
+    _load_project(project_id)
+    clip_path = OUTPUT_DIR / project_id / "video_clips" / f"clip_{index:04d}.mp4"
+    if clip_path.exists():
+        clip_path.unlink()
+    # 更新 video_paths.json
+    videos = _load_json(project_id, "video_paths.json") or []
+    if index < len(videos):
+        videos[index] = None
+        _save_json(project_id, "video_paths.json", videos)
+    return {"message": f"视频片段 {index} 已删除"}
+
+
 @app.get("/api/projects")
 async def list_projects():
     projects = []
