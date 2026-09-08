@@ -5,6 +5,12 @@ const api = axios.create({
   timeout: 30000,
 })
 
+// AI 改写剧本需生成完整 JSON + 可能多轮重试（对齐后端 LLM 300s 超时）
+const slow = axios.create({
+  baseURL: '/api',
+  timeout: 300000,
+})
+
 // 项目
 export const getProjects = () => api.get('/projects')
 export const createProject = (data) => api.post('/projects', data)
@@ -33,6 +39,10 @@ export const composeVideo = (id, force) => api.post(`/projects/${id}/compose`, n
 export const getBudget = (id) => api.get(`/projects/${id}/budget`)
 export const redoSingleShot = (id, index, force) => api.post(`/projects/${id}/shot/${index}/redo`, null, { params: withForce(force) })
 export const getTaskStatus = (id) => api.get(`/projects/${id}/task`)
+
+// AI 剧本助手
+export const aiChatScript = (id, instruction, force) => slow.post(`/projects/${id}/chat`, { instruction, force })
+export const applyScript = (id, script) => slow.post(`/projects/${id}/script/apply`, { script })
 
 // 删除资产
 export const deleteScript = (id) => api.delete(`/projects/${id}/script`)

@@ -27,7 +27,7 @@ def _has_audio_stream(media_path: str) -> bool:
 
 
 def _build_subtitle_text(shot: Shot) -> str:
-    """构建字幕文本"""
+    """构建字幕文本（多条对白/旁白各自独立一行；再做自适应断行）"""
     parts = []
     if shot.dialogues:
         for d in shot.dialogues:
@@ -38,9 +38,78 @@ def _build_subtitle_text(shot: Shot) -> str:
     return "\n".join(parts) if parts else ""
 
 
+def _display_width(text: str) -> int:
+    """估算显示宽度：中文/全角按 2 单位，其余按 1"""
+    w = 0
+    for ch in text:
+        w += 2 if ord(ch) > 0x2E7F else 1  # CJK 及全角
+    return w
+
+
+def _wrap_line(text: str, max_width: int) -> list:
+    """按显示宽度贪心断行（尽量在标点后断，避免把一个词切断）"""
+    if _display_width(text) <= max_width:
+        return [text]
+    lines = []
+    cur = ""
+    cur_w = 0
+    for ch in text:
+        cw = _display_width(ch)
+        if cur_w + cw > max_width:
+            # 尝试回退到最近断点
+            cut = -1
+            for i in range(len(cur) - 1, -1, -1):
+                if cur[i] in "，。！？；：、,.!?;: ":
+                    cut = i + 1
+                    break
+            if cut > 0:
+                lines.append(cur[:cut])
+                cur = cur[cut:]
+            else:
+                lines.append(cur)
+                cur = ""
+            cur_w = _display_width(cur)
+        cur += ch
+        cur_w += cw
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _format_subtitle_for_drawtext(shot: Shot) -> dict:
+    """把镜头字幕格式化为可安全进 drawtext 的多行文本。
+
+    目标（1920×1080）：整段字幕不超出画面——左右用断行限制宽度，
+    上下用“总高 = 行数 × 字号 ≤ ~200px”限制，超长自动缩小字号且不丢字。
+    返回 {"text": 真实换行分隔的多行文本, "lines": 行数, "fontsize": 字号}
+    """
+    raw = _build_subtitle_text(shot)
+    if not raw:
+        return {"text": "", "lines": 0, "fontsize": 36}
+
+    # 第一遍：按可读宽度断行（每行上限 28 全角≈56 显示宽，留边距）
+    def _reflow(width):
+        out = []
+        for seg in raw.split("\n"):
+            out.extend(_wrap_line(seg, width))
+        return out
+
+    lines = _reflow(56)
+    # 若行数过多，逐步放宽单行宽度以减少行数（不超画面宽 70 上限）
+    for width in (60, 64, 68, 72):
+        if len(lines) <= 5:
+            break
+        lines = _reflow(width)
+
+    # 行数对应的字号：3行28、4行24、5行21、6行18……保证总高 ~200px 内
+    fontsize = max(16, int(200 / max(len(lines), 1) / 1.35))
+    return {"text": "\n".join(lines), "lines": len(lines), "fontsize": fontsize}
+
+
 def _escape_drawtext(text: str) -> str:
-    """转义 drawtext 文本中的特殊字符"""
+    """转义 drawtext 文本中的特殊字符（含把换行转成 drawtext 能识别的 \\n）"""
     text = text.replace("\\", "\\\\")
+    text = text.replace("\n", "\\n")
     text = text.replace("'", "\\'")
     text = text.replace(":", "\\:")
     text = text.replace("%", "%%")
@@ -96,19 +165,19 @@ async def compose_final_video(
             duration = video_len if video_source else max(shot.duration, video_len)
 
         temp_output = output_dir / f"temp_clip_{i:04d}.mp4"
-        subtitle_text = _build_subtitle_text(shot)
 
         # 构建滤镜
         filter_parts = []
         video_filters = []
 
-        # 字幕滤镜
-        if subtitle_text:
-            escaped = _escape_drawtext(subtitle_text)
+        # 字幕滤镜（多行自动换行 + 行数多时缩小字号，避免超出画面）
+        sub = _format_subtitle_for_drawtext(shot)
+        if sub["text"]:
+            escaped = _escape_drawtext(sub["text"])
             video_filters.append(
                 f"drawtext=fontfile='{FONT_PATH}':text='{escaped}':"
-                f"fontcolor=white:fontsize=36:borderw=2:bordercolor=black:"
-                f"x=(w-text_w)/2:y=h-text_h-60"
+                f"fontcolor=white:fontsize={sub['fontsize']}:borderw=2:bordercolor=black:"
+                f"line_spacing=10:x=(w-text_w)/2:y=h-text_h-70"
             )
 
         cmd = [FFMPEG_PATH, "-y"]

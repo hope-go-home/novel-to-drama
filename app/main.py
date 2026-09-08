@@ -314,6 +314,64 @@ async def delete_project(project_id: str):
     return {"message": "项目已删除"}
 
 
+# ============ AI 剧本助手 ============
+
+@app.post("/api/projects/{project_id}/chat")
+async def ai_chat_script(project_id: str, body: dict):
+    """AI 对话式修改剧本（仅生成建议，不改动已存剧本）"""
+    from .engines.chat_engine import ai_revise_script
+    instruction = (body.get("instruction") or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="请输入修改要求")
+
+    project = _load_project(project_id)
+    if not project.script:
+        raise HTTPException(status_code=400, detail="请先生成剧本，再使用 AI 助手修改")
+    current = project.script.model_dump()
+
+    # 成本预检：AI 改写按 token 计费，超出限额需确认（这里请求体 force 沿用现有确认机制）
+    block = await _budget_confirm_payload(project_id, "script", 3.0)
+    if block and not body.get("force"):
+        return block
+
+    try:
+        result = await ai_revise_script(current, instruction)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 成本记账
+    await _record_usage(project_id, "script", 2.0)
+    add_log("SUCCESS", "chat", f"AI 助手生成修改建议（镜头 {result['before']['shots']} → {result['after']['shots']}）", project_id)
+    return result
+
+
+@app.post("/api/projects/{project_id}/script/apply")
+async def apply_script(project_id: str, body: dict):
+    """应用 AI 助手修改的剧本：备份旧版 → 替换 → 提示按需重跑（不清空下游产物）"""
+    from .models import Script as ScriptModel
+    revised = body.get("script")
+    if not revised:
+        raise HTTPException(status_code=400, detail="缺少 script 数据")
+
+    project = _load_project(project_id)
+    # 备份当前剧本，便于还原
+    if project.script:
+        backup_path = OUTPUT_DIR / project_id / "script_backup.json"
+        backup_path.write_text(json.dumps(project.script.model_dump(), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    # 替换剧本并重置状态（下游分镜/语音/视频保留，由用户决定是否重跑）
+    project.script = ScriptModel(**revised)
+    project.status = ProjectStatus.SCRIPT_DONE
+    project.error_message = ""
+    _save_project(project)
+
+    add_log("INFO", "chat", "已应用 AI 修改的剧本（已备份旧版）。旧分镜/语音/视频仍保留；若镜头有变，请删除对应资产后重跑以同步", project_id)
+    return {
+        "message": "剧本已更新（已备份旧版）。旧分镜/语音/视频仍保留供参考；若镜头结构或台词有变，请在下方删除对应资产后重新生成以同步。",
+        "status": project.status,
+    }
+
+
 @app.delete("/api/projects/{project_id}/script")
 async def delete_script(project_id: str):
     """删除剧本"""

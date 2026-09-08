@@ -42,6 +42,11 @@ COST_TABLE = {
     "tts_per_1k_chars": float(os.getenv("COST_TTS_PER_1K", "0.5")),           # TTS 每 1K 字符
 }
 
+# 单镜时长/字数约束（AI 剧本助手 + 语音/视频共用）
+# 视频模型单镜上限约 10s，朗读实测约 5~6 字/s；这里按 5 字/s、留 0.5s 余量
+SHOT_MAX_SEC = float(os.getenv("SHOT_MAX_SEC", "9.5"))
+SHOT_MAX_CHARS = int(os.getenv("SHOT_MAX_CHARS", "45"))
+
 # 通用
 IMAGE_STYLE = os.getenv("IMAGE_STYLE", "anime")
 VIDEO_DURATION = int(os.getenv("VIDEO_DURATION", "5"))

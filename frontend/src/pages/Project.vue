@@ -13,6 +13,7 @@
         </div>
         <button v-if="!running" class="btn btn-primary" @click="startFull">一键生成</button>
         <button v-if="running" class="btn btn-outline" @click="handleStop" style="color:var(--error);border-color:var(--error)">停止</button>
+        <button v-if="project.script && !running" class="btn btn-outline" @click="openAiAssistant">✎ AI 改剧本</button>
         <router-link to="/" class="btn btn-outline btn-sm">返回</router-link>
       </div>
     </div>
@@ -245,6 +246,95 @@
         </div>
       </section>
     </div>
+
+    <!-- AI 剧本助手 抽屉 -->
+    <Teleport to="body">
+      <div v-if="aiOpen" class="ai-mask" @click.self="aiOpen = false"></div>
+      <aside v-if="aiOpen" class="ai-drawer" aria-label="AI 剧本助手">
+        <div class="ai-head">
+          <div>
+            <h2>AI 改剧本</h2>
+            <p class="ai-sub">按约束修改，超长镜头会被自动拦截重写</p>
+          </div>
+          <button class="ai-close" @click="aiOpen = false" aria-label="关闭">✕</button>
+        </div>
+
+        <div class="ai-body">
+          <!-- 建议输入 -->
+          <div class="ai-chips">
+            <button
+              v-for="p in aiPresets"
+              :key="p"
+              class="ai-chip"
+              @click="aiInput = p"
+            >{{ p }}</button>
+          </div>
+          <textarea
+            v-model="aiInput"
+            class="ai-input"
+            rows="2"
+            placeholder="例如：把镜头 2 那段过长的旁白拆短，控制每镜 45 字以内"
+          ></textarea>
+
+          <div class="ai-actions">
+            <button
+              class="btn btn-primary btn-sm"
+              :disabled="aiBusy || !aiInput.trim()"
+              @click="handleAiChat"
+            >{{ aiBusy ? '改写中…' : '生成修改建议' }}</button>
+            <button
+              v-if="aiResult"
+              class="btn btn-sm"
+              :class="aiDirty ? 'btn-primary' : 'btn-outline'"
+              :disabled="aiBusy"
+              @click="handleAiApply"
+            >{{ aiDirty ? '应用此版本' : '已应用' }}</button>
+          </div>
+
+          <!-- 对话/建议结果 -->
+          <div v-if="aiMsg" :class="['ai-note', aiMsgType]">{{ aiMsg }}</div>
+
+          <template v-if="aiResult">
+            <div class="ai-summary">
+              <span>镜头数</span>
+              <strong>{{ aiResult.before.shots }} → {{ aiResult.after.shots }}</strong>
+              <span>总朗读</span>
+              <strong>{{ aiResult.before.total_chars }} → {{ aiResult.after.total_chars }} 字</strong>
+            </div>
+
+            <!-- 变更镜次逐镜诊断 -->
+            <div class="ai-diffs">
+              <div class="ai-diff-hd">修改后超长镜头（≤9.5s 达标）</div>
+              <template v-if="aiIssues.length">
+                <div v-for="s in aiIssues" :key="`${s.scene}-${s.shot}`" class="ai-diff-row over">
+                  <span class="ai-diff-idx">S{{ s.scene }}·镜{{ s.shot }}</span>
+                  <span class="ai-diff-sec">{{ s.chars }} 字 ≈ {{ s.seconds }}s</span>
+                  <span class="ai-tag warn">超限</span>
+                </div>
+              </template>
+              <div v-else class="ai-clear">✓ 无超长镜头，全部在视频可覆盖时长内</div>
+            </div>
+          </template>
+
+          <!-- 剧本已生效：手动选择要重跑的下游步骤 -->
+          <div v-if="!aiDirty && aiResult" class="ai-rerun">
+            <div class="ai-rerun-hd">剧本已生效 ✅ 手动选择要重跑的下游步骤</div>
+            <p class="ai-rerun-sub">旧分镜/语音/视频仍保留。AI 若只改了台词文本，可只重跑「语音合成」与「AI 视频」；若镜头数/画面描述有变，建议重跑「分镜画面」后依序重跑。</p>
+            <div class="ai-rerun-btns">
+              <button
+                v-for="s in steps"
+                :key="s.key"
+                v-show="resetStepApi[s.key]"
+                class="btn btn-outline btn-sm"
+                :disabled="running"
+                @click="doRunStep(s.key)"
+              >重跑「{{ s.label }}」</button>
+            </div>
+            <button class="btn btn-ghost btn-sm ai-rerun-later" @click="aiOpen = false">暂时不重跑</button>
+          </div>
+        </div>
+      </aside>
+    </Teleport>
   </div>
 </template>
 
@@ -257,7 +347,7 @@ import {
   generateAudio, generateVideos, composeVideo,
   deleteScript, deleteCharacters, deleteShots, deleteAudio,
   deleteVideos, deleteOutput, deleteSingleShot, deleteSingleVideo,
-  updateProjectSettings, redoSingleShot
+  updateProjectSettings, redoSingleShot, aiChatScript, applyScript
 } from '../api'
 import { getLogs, clearLogs } from '../api'
 import LogPanel from '../components/LogPanel.vue'
@@ -348,6 +438,96 @@ const loadFinalVideo = async () => {
     return true
   } catch (e) {
     return false
+  }
+}
+
+// ---- AI 剧本助手 ----
+const aiOpen = ref(false)
+const aiInput = ref('')
+const aiBusy = ref(false)
+const aiResult = ref(null)      // {before,after,revised,warnings,changed_shots}
+const aiDirty = ref(true)       // 建议尚未应用
+const aiMsg = ref('')
+const aiMsgType = ref('ok')     // ok / warn / err
+const aiPresets = [
+  '把所有超过 9.5s 的镜头拆分或精简到 45 字以内',
+  '把旁白整体写得简洁一些，控制每镜时长',
+  '给台词较多的一镜加上动作描述，并精简对白',
+]
+
+const openAiAssistant = () => {
+  aiOpen.value = true
+  aiResult.value = null
+  aiDirty.value = true
+  aiMsg.value = ''
+}
+
+const aiIssues = computed(() => {
+  if (!aiResult.value || !aiResult.value.revised) return []
+  const shots = []
+  const walk = (scenes) => {
+    for (const sc of scenes || []) {
+      for (const s of sc.shots || []) {
+        const chars = (s.narrator || '').length +
+          (s.dialogues || []).reduce((n, d) => n + (d.line || '').length, 0)
+        const secs = chars / 5
+        shots.push({ scene: sc.scene_number, shot: s.shot_number, chars, seconds: Number(secs.toFixed(1)) })
+      }
+    }
+  }
+  walk(aiResult.value.revised.scenes)
+  return shots.filter(x => x.seconds > 9.5)
+})
+
+const handleAiChat = async () => {
+  if (!aiInput.value.trim()) return
+  aiBusy.value = true
+  aiMsg.value = ''
+  aiMsgType.value = 'ok'
+  aiResult.value = null
+  try {
+    const { data } = await aiChatScript(route.params.id, aiInput.value.trim())
+    if (data.code === 'budget_confirm') {
+      const go = window.confirm(`${data.message}\n\n继续将消耗少量 token 用于 AI 改写。`)
+      if (!go) { aiBusy.value = false; return }
+      const { data: forced } = await aiChatScript(route.params.id, aiInput.value.trim(), true)
+      data.code = undefined
+      Object.assign(data, forced)
+    }
+    aiResult.value = data
+    aiDirty.value = true
+    aiMsg.value = '已生成修改建议，请核对下方时长诊断后点击「应用此版本」。'
+    aiMsgType.value = 'ok'
+    aiInput.value = ''
+  } catch (e) {
+    aiMsg.value = '改写失败：' + (e.response?.data?.detail || e.message)
+    aiMsgType.value = 'err'
+  } finally {
+    aiBusy.value = false
+  }
+}
+
+const handleAiApply = async () => {
+  if (!aiResult.value || !aiDirty.value) return
+  const n = aiResult.value.revised
+  const beforeCount = aiResult.value.before?.shots ?? 0
+  const afterCount = aiResult.value.after?.shots ?? 0
+  const msg = beforeCount === afterCount
+    ? '应用后将替换剧本；旧分镜/语音/视频仍保留。若镜头内容有变，请删除对应资产后重跑以同步。是否继续？'
+    : `应用后将替换剧本（镜头数 ${beforeCount} → ${afterCount}）。镜头数有变，旧分镜/语音/视频序号不再匹配，请删除后重新生成。是否继续？`
+  if (!window.confirm(msg)) return
+  aiBusy.value = true
+  try {
+    await applyScript(route.params.id, n)
+    aiDirty.value = false
+    aiMsg.value = '已应用（已备份旧剧本）。旧分镜/语音/视频仍保留供参考；需要同步时，删除对应资产后点击步骤重跑即可。'
+    aiMsgType.value = 'ok'
+    await loadProject()
+  } catch (e) {
+    aiMsg.value = '应用失败：' + (e.response?.data?.detail || e.message)
+    aiMsgType.value = 'err'
+  } finally {
+    aiBusy.value = false
   }
 }
 
@@ -459,24 +639,48 @@ const runWithBudget = async (fn, label) => {
   return true
 }
 
+// 重跑某步：先清该步旧产物，再全量重建（AI 改剧本后可单独挑要重跑的步骤）
+const resetStepApi = {
+  characters: deleteCharacters,
+  shots: deleteShots,
+  audio: deleteAudio,
+  videos: deleteVideos,
+  compose: deleteOutput,
+}
+
+const doRunStep = async (key) => {
+  if (running.value) {
+    alert('当前有任务正在运行，请先停止或等待完成')
+    return false
+  }
+  running.value = true
+  try {
+    const reset = resetStepApi[key]
+    if (reset) {
+      try { await reset(route.params.id) } catch (e) {}
+    }
+    const apiFn = stepApi[key]
+    const started = await runWithBudget((force) => apiFn(route.params.id, force), steps.value.find(s => s.key === key)?.label || key)
+    if (!started) { running.value = false; return false }
+    await loadProject()
+    startPolling()
+    return true
+  } catch (e) {
+    alert('失败: ' + (e.response?.data?.detail || e.message))
+    running.value = false
+    return false
+  }
+}
+
 const rerunStep = async (key) => {
   if (running.value) {
     alert('当前有任务正在运行，请先停止或等待完成')
     return
   }
   const label = steps.value.find(s => s.key === key)?.label
-  if (!confirm(`重跑「${label}」？`)) return
-  running.value = true
-  try {
-    const apiFn = stepApi[key]
-    const started = await runWithBudget((force) => apiFn(route.params.id, force), label)
-    if (!started) { running.value = false; return }
-    await loadProject()
-    startPolling()
-  } catch (e) {
-    alert('失败: ' + (e.response?.data?.detail || e.message))
-    running.value = false
-  }
+  const extra = resetStepApi[key] ? '\n将清空该步骤已生成的旧产物并全量重建。' : ''
+  if (!confirm(`重跑「${label}」？${extra}`)) return
+  await doRunStep(key)
 }
 
 const startFull = async () => {
@@ -1137,4 +1341,170 @@ onUnmounted(() => {
   max-height: 90vh;
   border-radius: var(--radius);
 }
+</style>
+
+<style>
+/* AI 剧本助手抽屉（Teleport 到 body，需非 scoped） */
+.ai-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(28, 25, 23, 0.4);
+  z-index: 1100;
+  animation: fadeIn 0.2s ease;
+}
+.ai-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  width: min(420px, 92vw);
+  background: var(--bg-card);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  z-index: 1101;
+  display: flex;
+  flex-direction: column;
+  animation: fadeIn 0.2s ease;
+}
+.ai-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.ai-head h2 {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0;
+}
+.ai-sub {
+  font-size: 12px;
+  color: var(--text-light);
+  margin: 2px 0 0;
+}
+.ai-close {
+  border: none;
+  background: var(--bg-hover);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.ai-close:hover { background: var(--border); color: var(--text); }
+
+.ai-body {
+  padding: 16px 20px 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ai-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ai-chip {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 100px;
+  border: 1px solid var(--border-dark);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.ai-chip:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-bg); }
+
+.ai-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font-body);
+  resize: vertical;
+}
+.ai-input:focus { outline: none; border-color: var(--primary); }
+
+.ai-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.ai-note {
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  line-height: 1.5;
+}
+.ai-note.ok { background: var(--success-bg); color: var(--success); }
+.ai-note.warn { background: var(--warning-bg); color: var(--warning); }
+.ai-note.err { background: var(--error-bg); color: var(--error); }
+
+.ai-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 10px 12px;
+  background: var(--bg-hover);
+  border-radius: var(--radius);
+  flex-wrap: wrap;
+}
+.ai-summary strong { color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+.ai-diffs { border-top: 1px dashed var(--border-dark); padding-top: 12px; }
+.ai-diff-hd {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.ai-diff-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.ai-diff-row:last-child { border-bottom: none; }
+.ai-diff-idx {
+  min-width: 84px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  font-weight: 500;
+}
+.ai-diff-sec { color: var(--text-dim); flex: 1; font-variant-numeric: tabular-nums; }
+.ai-diff-row.over .ai-diff-idx { color: var(--error); }
+
+.ai-tag {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 100px;
+}
+.ai-tag.warn { background: var(--error-bg); color: var(--error); }
+.ai-clear { color: var(--success); font-size: 13px; }
+
+/* 剧本已生效后：手动选择重跑 */
+.ai-rerun {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 14px;
+}
+.ai-rerun-hd {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--success);
+  margin-bottom: 6px;
+}
+.ai-rerun-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+.ai-rerun-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.ai-rerun-btns .btn { margin: 0; }
+.ai-rerun-later { color: var(--text-light); margin-top: 8px; }
 </style>
