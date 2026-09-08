@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend smoke test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install core dependencies
+        run: |
+          pip install --upgrade pip
+          # 只装 main 顶层 import 所需的核心依赖（AI 引擎在运行时才 import，
+          # 需要真实 API key 与火山 SDK，不适合在 CI 里拉取）
+          pip install fastapi uvicorn httpx pydantic python-dotenv \
+                      pillow redis "sse-starlette>=2.1.0" imageio-ffmpeg
+
+      - name: Syntax check (compileall)
+        run: python -m compileall -q app ui.py
+
+      - name: Import app + route table
+        run: python -c "import app.main; print('import OK, routes =', len(app.main.app.routes))"
+
+      - name: Import new modules (redis degrade / cost / quality / registry)
+        run: |
+          python -c "from app.utils import redis_client, task_registry, event_bus, ffmpeg_utils; print('utils OK')"
+          python -c "from app.engines import cost_engine, quality_engine; print('engines OK')"
+          python -c "from app.engines.cost_engine import estimate_cost; assert estimate_cost('video', 40) > 0; print('cost OK')"
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build

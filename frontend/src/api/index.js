@@ -28,6 +28,11 @@ export const generateAudio = (id) => api.post(`/projects/${id}/generate-audio`)
 export const generateVideos = (id) => api.post(`/projects/${id}/generate-videos`)
 export const composeVideo = (id) => api.post(`/projects/${id}/compose`)
 
+// 成本 / 质量 / 单镜重做
+export const getBudget = (id) => api.get(`/projects/${id}/budget`)
+export const redoSingleShot = (id, index) => api.post(`/projects/${id}/shot/${index}/redo`)
+export const getTaskStatus = (id) => api.get(`/projects/${id}/task`)
+
 // 删除资产
 export const deleteScript = (id) => api.delete(`/projects/${id}/script`)
 export const deleteCharacters = (id) => api.delete(`/projects/${id}/characters`)

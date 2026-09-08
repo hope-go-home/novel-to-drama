@@ -27,6 +27,23 @@ VOLC_TTS_APP_ID = os.getenv("VOLC_TTS_APP_ID", "")
 VOLC_TTS_ACCESS_TOKEN = os.getenv("VOLC_TTS_ACCESS_TOKEN", "")
 VOLC_TTS_RESOURCE_ID = os.getenv("VOLC_TTS_RESOURCE_ID", "seed-tts-1.0")
 
+# Redis（独立容器 ntd-redis，宿主端口 6381，与 rag/aw 实例隔离）
+REDIS_URL = os.getenv("REDIS_URL", "redis://:123456@localhost:6381/0")
+
+# 质量评估：是否启用 LLM 语义一致性打分（会消耗 token，受成本控制）
+ENABLE_LLM_QUALITY = os.getenv("ENABLE_LLM_QUALITY", "true").lower() in ("1", "true", "yes")
+
+# 成本控制：每日预算（元，全项目合计），超过后阻止新的高成本生成
+DAILY_BUDGET = float(os.getenv("DAILY_BUDGET", "30"))
+
+# 成本价格表（元/单位）
+COST_TABLE = {
+    "script_per_1k_tokens": float(os.getenv("COST_SCRIPT_PER_1K", "0.01")),   # LLM 每 1K token
+    "image_per_image": float(os.getenv("COST_IMAGE", "0.22")),                # Seedream 每张
+    "video_per_second": float(os.getenv("COST_VIDEO_SEC", "0.1")),            # 视频每秒（5s≈0.5）
+    "tts_per_1k_chars": float(os.getenv("COST_TTS_PER_1K", "0.5")),           # TTS 每 1K 字符
+}
+
 # 通用
 IMAGE_STYLE = os.getenv("IMAGE_STYLE", "anime")
 VIDEO_DURATION = int(os.getenv("VIDEO_DURATION", "5"))

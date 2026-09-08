@@ -41,6 +41,20 @@
       <span>{{ project.error_message }}</span>
     </div>
 
+    <!-- 成本预算横幅 -->
+    <div v-if="project.daily_budget" class="budget-bar" :class="{ warn: budgetWarn }">
+      <div class="budget-info">
+        <span class="budget-dot" aria-hidden="true"></span>
+        <span class="budget-label">今日成本</span>
+        <span class="budget-num">¥{{ project.spend || 0 }}</span>
+        <span class="budget-sep">/ 限额 ¥{{ project.daily_budget }}</span>
+      </div>
+      <div class="budget-track">
+        <div class="budget-fill" :style="{ width: budgetPct + '%' }"></div>
+      </div>
+      <span v-if="budgetWarn" class="budget-hint">接近限额，AI 视频将自动降级为图文卡点模式</span>
+    </div>
+
     <!-- 日志面板 -->
     <LogPanel :logs="logs" @clear="handleClearLogs" @refresh="loadLogs" class="mb-3" />
 
@@ -151,12 +165,19 @@
             <div v-if="src" @click="lightbox = img(src)">
                 <img :src="img(src)" :alt="'镜头 ' + (i+1)" />
               <div class="shot-label">{{ i + 1 }}</div>
+              <div v-if="qualityOf(i)" :class="['quality-badge', 'ql-' + qualityOf(i).level]"
+                   :title="qualityReason(i)">
+                {{ qualityOf(i).score }}<small>分</small>
+              </div>
             </div>
             <div v-else class="shot-empty">
               <span>{{ i + 1 }}</span>
               <span class="text-xs">无画面</span>
             </div>
-            <button v-if="src" class="delete-badge" @click.stop="handleDeleteSingleShot(i)" title="删除">✕</button>
+            <div class="shot-tools">
+              <button v-if="src && !running" class="redo-badge" @click.stop="handleRedoShot(i)" title="重新生成此镜（画质/内容不满意）">↻ 重做此镜</button>
+              <button v-if="src" class="delete-badge" @click.stop="handleDeleteSingleShot(i)" title="删除">✕</button>
+            </div>
           </div>
         </div>
       </section>
@@ -236,7 +257,7 @@ import {
   generateAudio, generateVideos, composeVideo,
   deleteScript, deleteCharacters, deleteShots, deleteAudio,
   deleteVideos, deleteOutput, deleteSingleShot, deleteSingleVideo,
-  updateProjectSettings
+  updateProjectSettings, redoSingleShot
 } from '../api'
 import { getLogs, clearLogs } from '../api'
 import LogPanel from '../components/LogPanel.vue'
@@ -251,8 +272,10 @@ const videoPaths = ref([])
 const expandedScenes = reactive({})
 const lightbox = ref(null)
 const logs = ref([])
+const qualities = ref([])
 let pollTimer = null
 let logTimer = null
+let sseSource = null
 
 const ALL_STEPS = [
   { key: 'script', label: '剧本改写' },
@@ -310,6 +333,7 @@ const loadProject = async () => {
     shotImages.value = data.shot_images || []
     audioPaths.value = data.audio_paths || []
     videoPaths.value = data.video_paths || []
+    qualities.value = data.shot_qualities || []
     // 加载最终视频（只要有 result 文件就显示，不依赖 status）
     try {
       const { data: r } = await getResult(route.params.id)
@@ -318,6 +342,54 @@ const loadProject = async () => {
       finalVideoUrl.value = ''
     }
   } catch (e) { console.error(e) }
+}
+
+// ---- 成本预算 ----
+const budgetPct = computed(() => {
+  const b = project.value.daily_budget
+  if (!b) return 0
+  return Math.min(100, Math.round(((project.value.spend || 0) / b) * 100))
+})
+const budgetWarn = computed(() => budgetPct.value >= 80)
+
+// ---- 质量徽标 ----
+const qualityOf = (index) => qualities.value?.[index] || null
+const qualityReason = (index) => {
+  const q = qualityOf(index)
+  if (!q) return ''
+  return `画面质量 ${q.score} 分 · ${q.reason || '通过'}`.trim()
+}
+
+const handleRedoShot = async (index) => {
+  if (!confirm(`重新生成镜头 ${index + 1}？将重做该镜的画面/音频/视频并重新合成，其余镜头保留。`)) return
+  running.value = true
+  try {
+    await redoSingleShot(route.params.id, index)
+    startPolling()
+  } catch (e) {
+    alert('重做失败: ' + (e.response?.data?.detail || e.message))
+    running.value = false
+  }
+}
+
+// ---- SSE 实时订阅（增量刷新日志 + 完成事件即时刷新卡片）----
+const connectSse = () => {
+  if (sseSource) sseSource.close()
+  if (!window.EventSource) return
+  const es = new EventSource(`/api/projects/${route.params.id}/events`)
+  es.addEventListener('log', async (ev) => {
+    try {
+      const log = JSON.parse(ev.data)
+      // 只在无轮询兜底时直接刷新；此处保守地刷新日志
+      await loadLogs()
+      const msg = log.message || ''
+      // 单个镜头完成 → 立即拉取最新状态（边生成边出图）
+      if (msg.includes('画面完成') || msg.includes('语音完成') || msg.includes('视频完成') || msg.includes('分镜') && msg.includes('完成')) {
+        await loadProject()
+      }
+    } catch (e) {}
+  })
+  sseSource = es
 }
 
 const stepApi = {
@@ -364,6 +436,7 @@ const handleStop = async () => {
     running.value = false
     if (pollTimer) clearInterval(pollTimer)
     if (logTimer) clearInterval(logTimer)
+    if (sseSource) { sseSource.close(); sseSource = null }
     await loadProject()
     await loadLogs()
   } catch (e) {
@@ -480,6 +553,7 @@ const startPolling = () => {
 onMounted(async () => {
   await loadProject()
   await loadLogs()
+  connectSse()
   const s = project.value.status
   const isRunning = s && (s.includes('generating') || s === 'composing')
   if (isRunning) {
@@ -488,7 +562,11 @@ onMounted(async () => {
   }
 })
 
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (logTimer) clearInterval(logTimer)
+  if (sseSource) { sseSource.close(); sseSource = null }
+})
 </script>
 
 <style scoped>
@@ -560,6 +638,39 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   display: flex;
   gap: 8px;
 }
+
+/* 成本预算横幅 */
+.budget-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.budget-bar.warn { border-color: #FDE68A; background: var(--warning-bg); }
+.budget-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-bg);
+}
+.budget-bar.warn .budget-dot { background: var(--warning); box-shadow: 0 0 0 3px #FEF3C7; }
+.budget-info { display: flex; align-items: baseline; gap: 6px; }
+.budget-label { color: var(--text-dim); }
+.budget-num { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.budget-sep { color: var(--text-light); }
+.budget-track {
+  flex: 1; min-width: 120px; height: 5px;
+  background: var(--bg-hover);
+  border-radius: 100px; overflow: hidden;
+}
+.budget-fill { height: 100%; background: var(--primary-light); border-radius: 100px; transition: width .3s ease; }
+.budget-bar.warn .budget-fill { background: var(--warning); }
+.budget-hint { color: var(--warning); font-weight: 500; }
 
 /* 内容区 */
 .sections { display: flex; flex-direction: column; gap: 28px; }
@@ -770,8 +881,10 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   border: 1px solid var(--border);
   aspect-ratio: 16/9;
   cursor: pointer;
+  background: var(--bg-hover);
 }
-.shot-card:hover { opacity: 0.85; }
+.shot-card > div:first-child { height: 100%; }
+.shot-card:hover { opacity: 0.92; }
 .shot-card img {
   width: 100%;
   height: 100%;
@@ -787,6 +900,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   font-size: 11px;
   padding: 1px 7px;
   border-radius: 100px;
+  pointer-events: none;
 }
 .shot-empty {
   display: flex;
@@ -798,10 +912,51 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   color: var(--text-light);
 }
 
-.delete-badge {
+/* 质量徽标（右上角，表意 = 该镜画面是否达到闸门标准） */
+.quality-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 1px 8px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 700;
+  color: white;
+  line-height: 1.6;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.quality-badge small { font-weight: 500; opacity: .85; }
+.quality-badge.ql-high { background: var(--success); }
+.quality-badge.ql-medium { background: var(--warning); }
+.quality-badge.ql-low { background: var(--error); }
+
+/* 卡片悬浮工具（重做 / 删除） */
+.shot-tools {
   position: absolute;
   top: 4px;
-  right: 4px;
+  left: 4px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.shot-card:hover .shot-tools { opacity: 1; }
+.redo-badge {
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 100px;
+  background: rgba(0,0,0,0.7);
+  color: white;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.redo-badge:hover { background: var(--primary); }
+
+.delete-badge {
   width: 22px;
   height: 22px;
   border-radius: 50%;
@@ -818,7 +973,12 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 }
 .shot-card:hover .delete-badge,
 .video-card:hover .delete-badge { opacity: 1; }
+.shot-card:hover .delete-badge { position: static; }
 .delete-badge:hover { background: var(--error); }
+
+/* 视频卡片的删除仍悬浮右上 */
+.video-card .delete-badge { position: absolute; top: 4px; right: 4px; }
+.shot-tools .delete-badge { position: static; }
 
 /* 视频片段 */
 .video-grid {

@@ -1,0 +1,14 @@
+# novel-to-drama 专用 Redis（独立容器，与 rag-redis:6379 / aw-redis:6380 隔离）
+# 启动: docker compose -f docker-compose.redis.yml up -d
+# 连接: redis://:123456@localhost:6381/0
+# 可视化: 复用现有 RedisInsight(http://localhost:5540)，Add Redis Database -> host=localhost port=6381
+services:
+  redis:
+    image: docker.m.daocloud.io/library/redis:7.2
+    container_name: ntd-redis
+    ports:
+      - "6381:6379"
+    volumes:
+      - D:\DockerData\NovelToDrama\redis:/data
+    command: redis-server --appendonly yes --requirepass 123456
+    restart: no

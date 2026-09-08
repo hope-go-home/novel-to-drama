@@ -42,6 +42,13 @@ def add_log(level: str, module: str, message: str, project_id: str = "", detail:
     if len(_logs) > MAX_LOGS:
         _logs.pop(0)
 
+    # 通知 SSE 长连接（事件总线 wake），让订阅端及时收到新日志
+    try:
+        from .event_bus import notify_log_updated
+        notify_log_updated()
+    except Exception:
+        pass
+
     # 写入 JSON 文件（前端用）
     try:
         LOG_JSON_FILE.parent.mkdir(parents=True, exist_ok=True)

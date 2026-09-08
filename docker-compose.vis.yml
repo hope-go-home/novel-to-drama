@@ -1,0 +1,13 @@
+# novel-to-drama RedisInsight 可视化（独立容器，宿主端口 5541，不影响 aw-redisinsight:5540）
+# 注意：redisinsight 镜像内部监听 5540，此处宿主 5541 → 容器 5540
+# 启动: docker compose -f docker-compose.vis.yml up -d
+# 访问: http://localhost:5541  →  Add Redis Database → host=localhost port=6381 password=123456
+services:
+  redisinsight:
+    image: docker.m.daocloud.io/redis/redisinsight:latest
+    container_name: ntd-redisinsight
+    ports:
+      - "5541:5540"
+    volumes:
+      - D:\DockerData\NovelToDrama\redisinsight:/data
+    restart: no
