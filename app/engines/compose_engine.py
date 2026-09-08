@@ -15,37 +15,15 @@ FONT_PATH = "C\\:/Windows/Fonts/msyh.ttc"
 
 
 def _get_media_duration(media_path: str) -> float:
-    """获取音视频文件时长"""
-    try:
-        result = subprocess.run(
-            [FFMPEG_PATH, "-i", media_path],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in result.stderr.split('\n'):
-            if 'Duration:' in line:
-                duration_str = line.split('Duration:')[1].split(',')[0].strip()
-                parts = duration_str.split(':')
-                hours = float(parts[0])
-                minutes = float(parts[1])
-                seconds = float(parts[2])
-                return hours * 3600 + minutes * 60 + seconds
-        return 3.0
-    except Exception:
-        return 3.0
+    """获取音视频文件时长（秒）；缺失/失败返回 0.0（统一委托 ffmpeg_utils）"""
+    from ..utils.ffmpeg_utils import probe_duration
+    return probe_duration(media_path)
 
 
 def _has_audio_stream(media_path: str) -> bool:
-    """探测媒体文件是否带音轨"""
-    if not media_path or not Path(media_path).exists():
-        return False
-    try:
-        result = subprocess.run(
-            [FFMPEG_PATH, "-i", media_path],
-            capture_output=True, text=True, timeout=10,
-        )
-        return any("Audio:" in line for line in result.stderr.split('\n'))
-    except Exception:
-        return False
+    """探测媒体文件是否带音轨（统一委托 ffmpeg_utils）"""
+    from ..utils.ffmpeg_utils import probe_has_audio
+    return probe_has_audio(media_path)
 
 
 def _build_subtitle_text(shot: Shot) -> str:

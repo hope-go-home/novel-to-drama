@@ -3,6 +3,7 @@ import uuid
 import json
 import shutil
 import traceback
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +20,19 @@ from .utils.task_registry import set_task, get_task, clear_task
 # 存储正在运行的任务，用于立即取消
 _running_tasks: dict[str, asyncio.Task] = {}
 
-app = FastAPI(title="小说转漫剧 API", version="0.1.0")
+# 服务关闭信号：lifespan shutdown 时置位，SSE 长连接据此主动结束，避免优雅停机等连接卡住
+_shutdown_event = asyncio.Event()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # 关闭阶段：通知所有 SSE 长连接主动结束（服务端断开），避免 Ctrl+C 需等长连接超时
+    _shutdown_event.set()
+    await asyncio.sleep(0.3)
+
+
+app = FastAPI(title="小说转漫剧 API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -176,6 +189,7 @@ async def create_project(req: ProjectCreate):
     project = Project(id=project_id, name=req.name, novel_text=req.novel_text, use_tts=req.use_tts)
     ensure_project_dir(project_id)
     _save_project(project)
+    add_log("SUCCESS", "system", f"创建项目「{req.name}」({project_id})", project_id)
     return {"project_id": project_id, "message": "项目创建成功"}
 
 
@@ -281,6 +295,8 @@ async def update_project_settings(project_id: str, body: dict):
     if "use_tts" in body:
         project.use_tts = bool(body["use_tts"])
     _save_project(project)
+    mode = "TTS 配音" if project.use_tts else "AI 原声"
+    add_log("INFO", "system", f"声音方案切换为「{mode}」", project_id)
     return {"use_tts": project.use_tts, "message": "设置已更新"}
 
 
@@ -289,7 +305,12 @@ async def delete_project(project_id: str):
     project_dir = OUTPUT_DIR / project_id
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="项目不存在")
+    try:
+        name = _load_project(project_id).name
+    except Exception:
+        name = project_id
     shutil.rmtree(project_dir)
+    add_log("WARN", "system", f"删除项目「{name}」", project_id)
     return {"message": "项目已删除"}
 
 
@@ -301,10 +322,11 @@ async def delete_script(project_id: str):
     project.status = ProjectStatus.CREATED
     _save_project(project)
     # 删除相关文件
-    for f in ["shot_images.json", "audio_paths.json", "video_paths.json"]:
+    for f in ["shot_images.json", "audio_paths.json", "video_paths.json", "shot_quality.json"]:
         p = OUTPUT_DIR / project_id / f
         if p.exists():
             p.unlink()
+    add_log("WARN", "script", "删除剧本（连带分镜/语音/视频记录）", project_id)
     return {"message": "剧本已删除"}
 
 
@@ -317,6 +339,7 @@ async def delete_characters(project_id: str):
     char_dir = OUTPUT_DIR / project_id / "characters"
     if char_dir.exists():
         shutil.rmtree(char_dir)
+    add_log("WARN", "character", "删除全部角色设计", project_id)
     return {"message": "角色设计已删除"}
 
 
@@ -331,6 +354,10 @@ async def delete_shots(project_id: str):
     p = OUTPUT_DIR / project_id / "shot_images.json"
     if p.exists():
         p.unlink()
+    pq = OUTPUT_DIR / project_id / "shot_quality.json"
+    if pq.exists():
+        pq.unlink()
+    add_log("WARN", "shot", "删除全部分镜画面", project_id)
     return {"message": "分镜画面已删除"}
 
 
@@ -345,6 +372,7 @@ async def delete_audio(project_id: str):
     p = OUTPUT_DIR / project_id / "audio_paths.json"
     if p.exists():
         p.unlink()
+    add_log("WARN", "audio", "删除全部语音", project_id)
     return {"message": "语音已删除"}
 
 
@@ -359,6 +387,7 @@ async def delete_videos(project_id: str):
     p = OUTPUT_DIR / project_id / "video_paths.json"
     if p.exists():
         p.unlink()
+    add_log("WARN", "video", "删除全部视频片段", project_id)
     return {"message": "视频片段已删除"}
 
 
@@ -370,6 +399,7 @@ async def delete_output(project_id: str):
     if output_dir.exists():
         shutil.rmtree(output_dir)
         output_dir.mkdir()
+    add_log("WARN", "compose", "删除最终合成视频", project_id)
     return {"message": "最终视频已删除"}
 
 
@@ -385,6 +415,12 @@ async def delete_single_shot(project_id: str, index: int):
     if index < len(images):
         images[index] = None
         _save_json(project_id, "shot_images.json", images)
+    # 同步清除对应质量记录，避免残留无图的旧徽标
+    qualities = _load_json(project_id, "shot_quality.json") or []
+    if index < len(qualities):
+        qualities[index] = None
+        _save_json(project_id, "shot_quality.json", qualities)
+    add_log("WARN", "shot", f"删除分镜 {index}", project_id)
     return {"message": f"分镜 {index} 已删除"}
 
 
@@ -400,6 +436,7 @@ async def delete_single_video(project_id: str, index: int):
     if index < len(videos):
         videos[index] = None
         _save_json(project_id, "video_paths.json", videos)
+    add_log("WARN", "video", f"删除视频片段 {index}", project_id)
     return {"message": f"视频片段 {index} 已删除"}
 
 
@@ -610,7 +647,7 @@ async def _run_audio_generation(project_id: str):
                 add_log("INFO", "audio", f"镜头 {i} 已有音频，跳过", project_id)
                 continue
             try:
-                result = await generate_shot_audio(shot, i, OUTPUT_DIR / project_id, project.script.characters)
+                result = await generate_shot_audio(shot, i, OUTPUT_DIR / project_id, project.script.characters, project_id)
                 audio_paths[i] = result
                 _save_json(project_id, "audio_paths.json", audio_paths)  # 每生成一个就保存
                 add_log("SUCCESS", "audio", f"镜头 {i} 语音完成", project_id)
@@ -678,7 +715,7 @@ async def _run_video_generation(project_id: str):
     try:
         image_paths = _load_json(project_id, "shot_images.json") or []
         audio_paths = _load_json(project_id, "audio_paths.json") or []
-        video_paths = await generate_video_clips(all_shots, image_paths, OUTPUT_DIR / project_id, project_id, audio_paths)
+        video_paths = await generate_video_clips(all_shots, image_paths, OUTPUT_DIR / project_id, project_id, audio_paths, use_tts=project.use_tts)
         project.status = ProjectStatus.VIDEO_DONE
         _save_project(project)
         _save_json(project_id, "video_paths.json", video_paths)
@@ -856,7 +893,7 @@ async def _run_full_pipeline(project_id: str):
                 project.status = ProjectStatus.AUDIO_GENERATING
                 _save_project(project)
                 all_shots = _get_all_shots(project)
-                audio_paths = await generate_all_audio(all_shots, project_dir, project.script.characters)
+                audio_paths = await generate_all_audio(all_shots, project_dir, project.script.characters, project_id)
                 _save_json(project_id, "audio_paths.json", audio_paths)
                 project.status = ProjectStatus.AUDIO_DONE
                 _save_project(project)
@@ -887,7 +924,7 @@ async def _run_full_pipeline(project_id: str):
             all_shots = _get_all_shots(project)
             try:
                 from .engines.video_engine import generate_video_clips
-                video_paths = await generate_video_clips(all_shots, image_paths, project_dir, project_id, audio_paths)
+                video_paths = await generate_video_clips(all_shots, image_paths, project_dir, project_id, audio_paths, use_tts=project.use_tts)
             except Exception as e:
                 print(f"视频生成失败，跳过: {e}")
                 video_paths = [None] * len(image_paths)
@@ -979,12 +1016,15 @@ async def sse_events(project_id: str):
         yield "retry: 3000\n\n"
         try:
             while True:
-                updated = await wait_log_update(timeout=10.0)
+                result = await wait_log_update(timeout=10.0, stop_event=_shutdown_event)
+                # 服务关闭信号 → 主动结束流，让连接干净断开
+                if result == "stop":
+                    break
                 all_logs = logger_mod._logs
                 current = len(all_logs)
                 if current < cursor:  # 清空过
                     cursor = 0
-                if updated:
+                if result == "update":
                     while cursor < current:
                         log = all_logs[cursor]
                         cursor += 1
@@ -1056,11 +1096,11 @@ async def _run_single_shot_redo(project_id: str, index: int):
             from .engines.audio_engine import generate_shot_audio
             audio_paths = _load_json(project_id, "audio_paths.json") or []
             if index < len(audio_paths):
-                audio_paths[index] = await generate_shot_audio(shot, index, project_dir, project.script.characters)
+                audio_paths[index] = await generate_shot_audio(shot, index, project_dir, project.script.characters, project_id)
             _save_json(project_id, "audio_paths.json", audio_paths)
         # 4) 重生成该镜头视频（其余镜头文件已存在会跳过）
         from .engines.video_engine import generate_video_clips
-        video_paths = await generate_video_clips(all_shots, images, project_dir, project_id, _load_json(project_id, "audio_paths.json") or [])
+        video_paths = await generate_video_clips(all_shots, images, project_dir, project_id, _load_json(project_id, "audio_paths.json") or [], use_tts=project.use_tts)
         _save_json(project_id, "video_paths.json", video_paths)
         # 5) 重新合成最终视频
         from .engines.compose_engine import compose_final_video

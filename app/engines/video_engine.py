@@ -4,6 +4,7 @@
 import httpx
 import asyncio
 import base64
+import json
 import subprocess
 from pathlib import Path
 from ..config import DASHSCOPE_API_KEY, VIDEO_API_BASE, VIDEO_MODEL, VIDEO_DURATION
@@ -14,36 +15,29 @@ VIDEO_SYNTH_URL = f"{VIDEO_API_BASE}/api/v1/services/aigc/video-generation/video
 TASK_QUERY_URL = f"{VIDEO_API_BASE}/api/v1/tasks"
 
 
-# 使用 imageio-ffmpeg 内置的 FFmpeg
-try:
-    import imageio_ffmpeg
-    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-except ImportError:
-    FFMPEG_PATH = "ffmpeg"
+def resolve_media_type() -> str:
+    """根据模型选择首帧图参数类型。
+    - r2v（reference-image-to-video，如 wan2.7-r2v / happyhorse-1.1-r2v）→ reference_image
+    - 其余首帧生成模型（i2v / wan 图生视频）→ first_frame
+    """
+    m = (VIDEO_MODEL or "").lower()
+    if "r2v" in m:
+        return "reference_image"
+    return "first_frame"
 
 
 def _get_media_duration(media_path: str) -> float:
-    """获取音视频文件时长"""
-    try:
-        result = subprocess.run(
-            [FFMPEG_PATH, "-i", media_path],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in result.stderr.split('\n'):
-            if 'Duration:' in line:
-                duration_str = line.split('Duration:')[1].split(',')[0].strip()
-                parts = duration_str.split(':')
-                hours = float(parts[0])
-                minutes = float(parts[1])
-                seconds = float(parts[2])
-                return hours * 3600 + minutes * 60 + seconds
-        return 3.0
-    except Exception:
-        return 3.0
+    """获取音视频文件时长（秒）；缺失/失败返回 0.0（统一委托 ffmpeg_utils）"""
+    from ..utils.ffmpeg_utils import probe_duration
+    return probe_duration(media_path)
 
 
-def build_video_prompt(shot: Shot) -> str:
-    """构建视频生成 prompt（用场景图作首帧，注入台词/情绪/动作，并保证角色形象一致）"""
+def build_video_prompt(shot: Shot, use_tts: bool = True) -> str:
+    """构建视频生成 prompt（用场景图作首帧，注入台词/情绪/动作，并保证角色形象一致）
+
+    use_tts=True （TTS 配音模式）：画面做无声口型，禁止自带人声，对白由后期 TTS 提供
+    use_tts=False（AI 原声模式）：要求角色真实发声说出台词，保留视频自带对白/环境声
+    """
     parts = []
     # 参考图指代
     parts.append("Based on the scene in Image 1")
@@ -57,23 +51,32 @@ def build_video_prompt(shot: Shot) -> str:
     lines = shot.dialogues or []
     has_speech = any(d.line.strip() for d in lines)
     if has_speech:
-        parts.append("Keep every character's appearance and voice exactly identical to their established look in previous scenes")
+        parts.append("Keep every character's appearance exactly identical to their established look in previous scenes")
         for d in lines:
             if d.line.strip():
                 line = d.line.strip()
                 emotion = d.emotion or "平静"
                 action = f", {d.action.strip()}" if d.action and d.action.strip() else ""
-                parts.append(
-                    f'Character {d.character} mouths the line silently: "{line}" '
-                    f"with a {emotion} facial expression and lip movement only{action}"
-                )
-        # 对白由后期 TTS 配音提供，禁止视频自带任何人声/朗读声
-        parts.append(
-            "The dialogue is dubbed later; generate NO audible speech, no vocals, "
-            "no English or any language narration audio, no mouthing sounds. "
-            "Audio track (if any) should contain only ambient/environmental sound effects such as wind, footsteps or background noise."
-        )
-    elif shot.narrator and shot.narrator.strip():
+                if use_tts:
+                    # TTS 模式：无声对口型，人声由后期配音
+                    parts.append(
+                        f'Character {d.character} mouths the line silently: "{line}" '
+                        f"with a {emotion} facial expression and lip movement only{action}"
+                    )
+                else:
+                    # 原声模式：角色要真实发声说出台词（成片直接使用视频自带人声）
+                    parts.append(
+                        f'Character {d.character} says aloud the line: "{line}" '
+                        f"with a {emotion} tone of voice and natural speech{action}"
+                    )
+        if use_tts:
+            # TTS 模式对白由后期配音提供，禁止视频自带任何人声/朗读声
+            parts.append(
+                "The dialogue is dubbed later; generate NO audible speech, no vocals, "
+                "no English or any language narration audio, no mouthing sounds. "
+                "Audio track (if any) should contain only ambient/environmental sound effects such as wind, footsteps or background noise."
+            )
+    elif shot.narrator and shot.narrator.strip() and use_tts:
         parts.append(
             "No character speaks aloud or mouths anything; this scene is silent, "
             "its narration is added later as voice-over. "
@@ -118,7 +121,7 @@ async def _generate_video_clip(
         "input": {
             "prompt": prompt,
             "media": [
-                {"type": "reference_image", "url": data_uri}
+                {"type": resolve_media_type(), "url": data_uri}
             ],
         },
         "parameters": {
@@ -190,15 +193,31 @@ async def generate_video_clips(
     project_dir: Path,
     project_id: str = "",
     audio_paths: list = None,
+    use_tts: bool = True,
 ) -> list[str]:
-    """为所有分镜生成 AI 视频片段"""
+    """为所有分镜生成 AI 视频片段（每完成一个即增量写 video_paths.json，供前端实时展示）"""
     clips_dir = project_dir / "video_clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
+
+    index_path = project_dir / "video_paths.json"
+    total = len(shots)
+
+    def _flush(indexes: list):
+        """把当前已完成结果落盘为与镜头数等长的数组（未生成的位置为 null）"""
+        padded = list(indexes) + [None] * (total - len(indexes))
+        try:
+            index_path.write_text(
+                json.dumps(padded, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(f"video_paths 增量写入失败: {e}")
 
     results = []
     for i, (shot, image_path) in enumerate(zip(shots, shot_image_paths)):
         if not image_path:
             results.append(None)
+            _flush(results)
             continue
 
         output_path = clips_dir / f"clip_{i:04d}.mp4"
@@ -207,6 +226,7 @@ async def generate_video_clips(
         if output_path.exists():
             add_log("INFO", "video", f"分镜 {i} 视频已存在，跳过生成", project_id, str(output_path))
             results.append(str(output_path))
+            _flush(results)
             continue
 
         # 计算视频时长：有配音则 = max(镜头基础时长, 对白+旁白总时长)，与合成对齐；无配音 4-6 秒
@@ -231,7 +251,7 @@ async def generate_video_clips(
         # 单镜视频硬上限 10 秒；更长的配音/旁白在合成阶段用冻结末帧延展
         duration = max(2, min(duration, 10))
 
-        prompt = build_video_prompt(shot)
+        prompt = build_video_prompt(shot, use_tts=use_tts)
 
         try:
             add_log("INFO", "video", f"开始生成分镜 {i} 视频（{duration}秒）", project_id)
@@ -247,6 +267,7 @@ async def generate_video_clips(
             add_log("ERROR", "video", f"分镜 {i} 视频生成失败", project_id, str(e))
             results.append(None)
 
+        _flush(results)
         await asyncio.sleep(1)
 
     return results

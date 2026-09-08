@@ -87,6 +87,7 @@ VOLC_TTS_RESOURCE_ID=seed-tts-2.0
 
 # 视频生成（阿里云 DashScope 万相 Wan）
 DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+VIDEO_MODEL=wan2.7-r2v-2026-06-12
 
 # 通用配置
 OUTPUT_DIR=./projects

@@ -334,14 +334,21 @@ const loadProject = async () => {
     audioPaths.value = data.audio_paths || []
     videoPaths.value = data.video_paths || []
     qualities.value = data.shot_qualities || []
-    // 加载最终视频（只要有 result 文件就显示，不依赖 status）
-    try {
-      const { data: r } = await getResult(route.params.id)
-      finalVideoUrl.value = img(r.video_path)
-    } catch (e) {
-      finalVideoUrl.value = ''
-    }
   } catch (e) { console.error(e) }
+}
+
+// 拉取最终视频。仅在项目已完成时调用，避免未合成完成时反复 404 刷后端日志
+// 加时间戳参数强制重新加载，确保重做后视频内容更新
+const loadFinalVideo = async () => {
+  try {
+    const { data: r } = await getResult(route.params.id)
+    const path = r.video_path
+    const base = img(path)
+    finalVideoUrl.value = base.includes('?') ? base : `${base}?v=${Date.now()}`
+    return true
+  } catch (e) {
+    return false
+  }
 }
 
 // ---- 成本预算 ----
@@ -373,22 +380,57 @@ const handleRedoShot = async (index) => {
   }
 }
 
-// ---- SSE 实时订阅（增量刷新日志 + 完成事件即时刷新卡片）----
+// ---- SSE 实时订阅（节流刷新 + 断线重连）----
+let sseRetryTimer = null
+let sseRetryCount = 0
+let lastProjectRefresh = 0
+let pendingProjectRefresh = null
+
+const refreshProjectThrottled = () => {
+  const now = Date.now()
+  // 距上次刷新不足 1.5s 时合并到下一次再刷，避免每个 log 都全量拉取
+  if (pendingProjectRefresh) return
+  const wait = Math.max(0, 1500 - (now - lastProjectRefresh))
+  const doRefresh = async () => {
+    pendingProjectRefresh = null
+    lastProjectRefresh = Date.now()
+    await loadProject()
+    // 合成完成 → 顺带刷新最终视频
+    if (project.value.status === 'done' && !finalVideoUrl.value) {
+      await loadFinalVideo()
+    }
+  }
+  pendingProjectRefresh = setTimeout(doRefresh, wait)
+}
+
 const connectSse = () => {
   if (sseSource) sseSource.close()
+  if (sseRetryTimer) { clearTimeout(sseRetryTimer); sseRetryTimer = null }
   if (!window.EventSource) return
   const es = new EventSource(`/api/projects/${route.params.id}/events`)
+  es.addEventListener('open', () => { sseRetryCount = 0 })
   es.addEventListener('log', async (ev) => {
     try {
       const log = JSON.parse(ev.data)
-      // 只在无轮询兜底时直接刷新；此处保守地刷新日志
+      // 日志面板增量刷新（轻量）
       await loadLogs()
       const msg = log.message || ''
-      // 单个镜头完成 → 立即拉取最新状态（边生成边出图）
-      if (msg.includes('画面完成') || msg.includes('语音完成') || msg.includes('视频完成') || msg.includes('分镜') && msg.includes('完成')) {
-        await loadProject()
+      // 完成类日志 → 节流刷新项目（画面/语音/视频出片即时可见）
+      if (msg.includes('画面完成') || msg.includes('语音完成') || msg.includes('视频完成') ||
+          (msg.includes('分镜') && msg.includes('完成')) || msg.includes('重做')) {
+        refreshProjectThrottled()
       }
     } catch (e) {}
+  })
+  es.addEventListener('error', () => {
+    // 浏览器触发重连失败时手动退避重连
+    if (es.readyState === EventSource.CLOSED && !sseSource) return
+    if (sseRetryCount >= 10) return // 上限 10 次，避免后台空转
+    sseRetryCount += 1
+    const delay = Math.min(15000, 1000 * 2 ** sseRetryCount)
+    sseRetryTimer = setTimeout(() => {
+      if (running.value) connectSse()
+    }, delay)
   })
   sseSource = es
 }
@@ -557,10 +599,7 @@ const startPolling = () => {
       clearInterval(logTimer)
       running.value = false
       if (s === 'done') {
-        try {
-          const { data } = await getResult(route.params.id)
-          finalVideoUrl.value = img(data.video_path)
-        } catch (e) {}
+        await loadFinalVideo()
       }
     }
   }
@@ -573,6 +612,10 @@ const startPolling = () => {
 onMounted(async () => {
   await loadProject()
   await loadLogs()
+  // 已完成项目：初始即拉取最终视频
+  if (project.value.status === 'done') {
+    await loadFinalVideo()
+  }
   connectSse()
   const s = project.value.status
   const isRunning = s && (s.includes('generating') || s === 'composing')
@@ -585,6 +628,8 @@ onMounted(async () => {
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (logTimer) clearInterval(logTimer)
+  if (sseRetryTimer) clearTimeout(sseRetryTimer)
+  if (pendingProjectRefresh) clearTimeout(pendingProjectRefresh)
   if (sseSource) { sseSource.close(); sseSource = null }
 })
 </script>

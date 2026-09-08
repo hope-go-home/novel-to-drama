@@ -51,6 +51,11 @@ VOICE_PRESETS = {
 # 正常情况由 choose_narrator_voice 按旁白文本风格自动匹配）
 NARRATOR_FALLBACK = "zh_female_zhixingnv_uranus_bigtts"             # 知性女（中性叙述兜底）
 
+# 单镜配音硬上限（秒）：视频模型时长有限，配音须压进该区间，保证不“配音比画面长”
+VOICE_TARGET_SEC = 10.0
+# 语速压缩上限：超过该语速仍超时则标记提示（不再无限加速，避免失真）
+VOICE_MAX_SPEED = 1.5
+
 # 角色描述关键词 → 音色类型映射
 VOICE_KEYWORDS = {
     # 女性
@@ -213,12 +218,17 @@ async def _synthesize_speech(
     voice_id: str,
     emotion: str,
     output_path: Path,
+    speed: float = None,
 ) -> str:
-    """合成语音（使用 doubao-speech 官方库）"""
+    """合成语音（使用 doubao-speech 官方库）
+
+    speed: 语速倍率；None 则按情绪默认语速。1.0=正常，1.25/1.5 为加速（用于压时长）。
+    """
     from doubao_speech import synthesize_async
 
-    # 情绪语速映射
+    # 情绪语速映射（默认），speed 显式传入则覆盖
     emotion_params = EMOTION_VOICE_MAP.get(emotion, EMOTION_VOICE_MAP["平静"])
+    final_speed = float(speed) if speed is not None else float(emotion_params["speed"])
 
     await synthesize_async(
         text=text,
@@ -227,7 +237,7 @@ async def _synthesize_speech(
         app_id=VOLC_TTS_APP_ID,
         access_token=VOLC_TTS_ACCESS_TOKEN,
         resource_id=VOLC_TTS_RESOURCE_ID,
-        speed_ratio=emotion_params["speed"],
+        speed=final_speed,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,68 +279,134 @@ async def _merge_audio_files(audio_files: list[str], output_path: Path) -> str:
     return str(output_path)
 
 
+async def _synth_dialogue(
+    speech: list,
+    shot_index: int,
+    audio_dir: Path,
+    characters: list[CharacterInfo],
+    speed: float = None,
+    force: bool = False,
+) -> str:
+    """合成一个镜头的全部对白（单段直接合成；多段逐段再合并）。
+
+    speed: 语速倍率（None=按各句情绪默认）；force=True 时忽略缓存强制重合成
+    """
+    final_dialogue = audio_dir / f"shot_{shot_index:04d}_dialogue.mp3"
+    if not force and final_dialogue.exists():
+        return str(final_dialogue)
+
+    # 强制重合成时清掉旧缓存（含逐段）
+    if force:
+        final_dialogue.unlink(missing_ok=True)
+        for f in audio_dir.glob(f"shot_{shot_index:04d}_dialogue_*.mp3"):
+            f.unlink(missing_ok=True)
+
+    if len(speech) == 1:
+        d = speech[0]
+        voice_id = _assign_voice(d.character, characters)
+        return await _synthesize_speech(
+            text=d.line, voice_id=voice_id, emotion=d.emotion,
+            output_path=final_dialogue, speed=speed,
+        )
+
+    # 多段：逐段合成（可复用缓存），再顺序合并
+    dialogue_files = []
+    for j, d in enumerate(speech):
+        seg_path = audio_dir / f"shot_{shot_index:04d}_dialogue_{j}.mp3"
+        if seg_path.exists() and not force:
+            dialogue_files.append(str(seg_path))
+            continue
+        if force:
+            seg_path.unlink(missing_ok=True)
+        voice_id = _assign_voice(d.character, characters)
+        path = await _synthesize_speech(
+            text=d.line, voice_id=voice_id, emotion=d.emotion,
+            output_path=seg_path, speed=speed,
+        )
+        dialogue_files.append(path)
+    return await _merge_audio_files(dialogue_files, final_dialogue)
+
+
+async def _synth_narrator(
+    narrator: str,
+    shot_index: int,
+    audio_dir: Path,
+    speed: float = None,
+    force: bool = False,
+) -> str:
+    """合成一个镜头的旁白。speed: 语速倍率；force=True 忽略缓存强制重合成"""
+    output_path = audio_dir / f"shot_{shot_index:04d}_narrator.mp3"
+    if not force and output_path.exists():
+        return str(output_path)
+    if force:
+        output_path.unlink(missing_ok=True)
+    return await _synthesize_speech(
+        text=narrator,
+        voice_id=_assign_narrator_voice(narrator),
+        emotion="平静",
+        output_path=output_path,
+        speed=speed,
+    )
+
+
+def _shot_voice_total(result: dict, base_dir: Path = None) -> float:
+    """测量本镜对白+旁白实际总时长（缺失文件按 0 计）"""
+    from ..utils.ffmpeg_utils import probe_duration
+    total = 0.0
+    for key in ("dialogue_audio", "narrator_audio"):
+        p = result.get(key)
+        if p:
+            total += probe_duration(p, base_dir=str(base_dir) if base_dir else None)
+    return total
+
+
 async def generate_shot_audio(
     shot: Shot,
     shot_index: int,
     project_dir: Path,
     characters: list[CharacterInfo],
+    project_id: str = "",
 ) -> dict:
+    """为单个镜头合成对白+旁白。
+
+    时长策略：视频模型时长有限，单镜配音尽量压进 VOICE_TARGET_SEC(10s)：
+    - 正常语速合成后若总长 ≤10s → 直接返回
+    - 超过 → 用 VOICE_MAX_SPEED(1.5) 语速重合成对白+旁白压缩
+    - 1.5 仍超 → 保留完整文本，add_log 提示建议拆分（字幕照常，由合成层兜底）
+    """
+    from ..utils.logger import add_log
     audio_dir = project_dir / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     result = {"dialogue_audio": None, "narrator_audio": None}
 
-    # 生成所有对话音频（支持多段对话），单段也统一命名为 shot_{i}_dialogue.mp3
-    if shot.dialogues:
-        final_dialogue = audio_dir / f"shot_{shot_index:04d}_dialogue.mp3"
-        speech = [d for d in shot.dialogues if d.line.strip()]
-
-        if len(speech) == 1:
-            # 单段：直接生成到统一命名文件
-            if final_dialogue.exists():
-                result["dialogue_audio"] = str(final_dialogue)
-            else:
-                d = speech[0]
-                voice_id = _assign_voice(d.character, characters)
-                result["dialogue_audio"] = await _synthesize_speech(
-                    text=d.line,
-                    voice_id=voice_id,
-                    emotion=d.emotion,
-                    output_path=final_dialogue,
-                )
-        elif len(speech) > 1:
-            # 多段：逐段生成（可复用缓存），再合并
-            if final_dialogue.exists():
-                result["dialogue_audio"] = str(final_dialogue)
-            else:
-                dialogue_files = []
-                for j, d in enumerate(speech):
-                    seg_path = audio_dir / f"shot_{shot_index:04d}_dialogue_{j}.mp3"
-                    if seg_path.exists():
-                        dialogue_files.append(str(seg_path))
-                    else:
-                        voice_id = _assign_voice(d.character, characters)
-                        path = await _synthesize_speech(
-                            text=d.line,
-                            voice_id=voice_id,
-                            emotion=d.emotion,
-                            output_path=seg_path,
-                        )
-                        dialogue_files.append(path)
-                result["dialogue_audio"] = await _merge_audio_files(dialogue_files, final_dialogue)
-
+    # 第 1 轮：正常语速（speed=None → 各句按情绪默认）合成
+    speech = [d for d in (shot.dialogues or []) if d.line.strip()]
+    if speech:
+        result["dialogue_audio"] = await _synth_dialogue(speech, shot_index, audio_dir, characters, speed=None)
     if shot.narrator and shot.narrator.strip():
-        output_path = audio_dir / f"shot_{shot_index:04d}_narrator.mp3"
-        # 检查文件是否已存在
-        if output_path.exists():
-            result["narrator_audio"] = str(output_path)
+        result["narrator_audio"] = await _synth_narrator(shot.narrator, shot_index, audio_dir, speed=None)
+
+    # 留 0.5s 余量：合计达到阈值即触发压缩，避免刚超 10s 边界
+    limit = VOICE_TARGET_SEC - 0.5
+
+    # 检查总时长
+    total = _shot_voice_total(result, base_dir=project_dir)
+    if total > limit:
+        # 超过 → 用 1.5 语速重合成压缩（宁可快也不读不完）
+        if speech:
+            result["dialogue_audio"] = await _synth_dialogue(speech, shot_index, audio_dir, characters, speed=VOICE_MAX_SPEED, force=True)
+        if shot.narrator and shot.narrator.strip():
+            result["narrator_audio"] = await _synth_narrator(shot.narrator, shot_index, audio_dir, speed=VOICE_MAX_SPEED, force=True)
+        total = _shot_voice_total(result, base_dir=project_dir)
+        if total > VOICE_TARGET_SEC:
+            # 1.5 仍超：保留完整文本 + 前端可见提示（手动拆分需重跑剧本）
+            add_log("WARN", "audio",
+                    f"镜头 {shot_index} 配音 {total:.1f}s 超上限 {VOICE_TARGET_SEC:.0f}s，语速 1.5 仍难压进，建议将此镜头拆分为多个镜头",
+                    project_id)
         else:
-            result["narrator_audio"] = await _synthesize_speech(
-                text=shot.narrator,
-                voice_id=_assign_narrator_voice(shot.narrator),
-                emotion="平静",
-                output_path=output_path,
-            )
+            add_log("INFO", "audio",
+                    f"镜头 {shot_index} 配音超限，已用 1.5 语速压至 {total:.1f}s", project_id)
 
     return result
 
@@ -339,9 +415,10 @@ async def generate_all_audio(
     shots: list[Shot],
     project_dir: Path,
     characters: list[CharacterInfo],
+    project_id: str = "",
 ) -> list[dict]:
     results = []
     for i, shot in enumerate(shots):
-        audio_info = await generate_shot_audio(shot, i, project_dir, characters)
+        audio_info = await generate_shot_audio(shot, i, project_dir, characters, project_id)
         results.append(audio_info)
     return results

@@ -12,13 +12,26 @@ except ImportError:
     FFMPEG_PATH = "ffmpeg"
 
 
-def probe_duration(media_path: str) -> float:
-    """获取音视频文件时长（秒）；失败返回 0.0"""
-    if not media_path or not Path(media_path).exists():
+def _resolve_path(media_path: str, base_dir: str = None) -> Path:
+    """解析媒体路径：若为相对路径且原位置不存在，则尝试相对 base_dir 拼接"""
+    p = Path(media_path)
+    if p.exists():
+        return p
+    if base_dir and not p.is_absolute():
+        cand = Path(base_dir) / p
+        if cand.exists():
+            return cand
+    return p
+
+
+def probe_duration(media_path: str, base_dir: str = None) -> float:
+    """获取音视频文件时长（秒）；失败/缺失返回 0.0"""
+    p = _resolve_path(media_path, base_dir)
+    if not p.exists():
         return 0.0
     try:
         result = subprocess.run(
-            [FFMPEG_PATH, "-i", media_path],
+            [FFMPEG_PATH, "-i", str(p)],
             capture_output=True, text=True, timeout=10,
         )
         for line in result.stderr.split('\n'):
@@ -31,13 +44,14 @@ def probe_duration(media_path: str) -> float:
         return 0.0
 
 
-def probe_has_audio(media_path: str) -> bool:
+def probe_has_audio(media_path: str, base_dir: str = None) -> bool:
     """判断媒体文件是否带音轨"""
-    if not media_path or not Path(media_path).exists():
+    p = _resolve_path(media_path, base_dir)
+    if not p.exists():
         return False
     try:
         result = subprocess.run(
-            [FFMPEG_PATH, "-i", media_path],
+            [FFMPEG_PATH, "-i", str(p)],
             capture_output=True, text=True, timeout=10,
         )
         return any("Audio:" in line for line in result.stderr.split('\n'))

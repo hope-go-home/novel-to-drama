@@ -22,13 +22,38 @@ def notify_log_updated():
         pass
 
 
-async def wait_log_update(timeout: float = 15.0) -> bool:
-    """等待新的日志产生；返回 True=有更新，False=超时（用于 SSE 心跳保活）"""
-    try:
+async def wait_log_update(timeout: float = 15.0, stop_event: asyncio.Event = None) -> str:
+    """等待新日志或停止信号。
+
+    返回：
+      "update" - 有新日志产生
+      "stop"   - 收到 stop_event（服务关闭，SSE 应主动结束连接）
+      "timeout"- 超时（用于 SSE 心跳保活）
+    """
+    # 若更新信号已置位（在本次 wait 之前产生），直接消费并返回，避免被误清
+    if _updated.is_set():
         _updated.clear()
-        await asyncio.wait_for(_updated.wait(), timeout=timeout)
-        return True
+        return "update"
+    tasks = [asyncio.create_task(_updated.wait())]
+    if stop_event is not None:
+        tasks.append(asyncio.create_task(stop_event.wait()))
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED, timeout=timeout)
     except asyncio.TimeoutError:
-        return False
+        pass
     except Exception:
-        return False
+        pass
+    finally:
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+    if stop_event is not None and stop_event.is_set():
+        return "stop"
+    if _updated.is_set():
+        _updated.clear()
+        return "update"
+    return "timeout"
