@@ -364,7 +364,8 @@ const handleRedoShot = async (index) => {
   if (!confirm(`重新生成镜头 ${index + 1}？将重做该镜的画面/音频/视频并重新合成，其余镜头保留。`)) return
   running.value = true
   try {
-    await redoSingleShot(route.params.id, index)
+    const started = await runWithBudget((force) => redoSingleShot(route.params.id, index, force), '单镜重做')
+    if (!started) { running.value = false; return }
     startPolling()
   } catch (e) {
     alert('重做失败: ' + (e.response?.data?.detail || e.message))
@@ -401,15 +402,33 @@ const stepApi = {
   compose: composeVideo,
 }
 
+// 预算确认：若接口返回 budget_confirm（今日花费将超限额），弹窗询问是否继续。
+// fn(force) 为执行函数：先 fn(false) 试探，确认继续后用 fn(true) 真正执行。
+const runWithBudget = async (fn, label) => {
+  const resp = await fn(false)
+  const data = resp?.data || {}
+  if (data.code === 'budget_confirm') {
+    const go = window.confirm(
+      `${data.message}\n\n点击「确定」将超出限额继续生成，费用会照常累计；点击「取消」则停止本次操作。`
+    )
+    if (!go) return false
+    await fn(true)  // force=true 继续
+  }
+  return true
+}
+
 const rerunStep = async (key) => {
   if (running.value) {
     alert('当前有任务正在运行，请先停止或等待完成')
     return
   }
-  if (!confirm(`重跑「${steps.value.find(s => s.key === key)?.label}」？`)) return
+  const label = steps.value.find(s => s.key === key)?.label
+  if (!confirm(`重跑「${label}」？`)) return
   running.value = true
   try {
-    await stepApi[key](route.params.id)
+    const apiFn = stepApi[key]
+    const started = await runWithBudget((force) => apiFn(route.params.id, force), label)
+    if (!started) { running.value = false; return }
     await loadProject()
     startPolling()
   } catch (e) {
@@ -421,7 +440,8 @@ const rerunStep = async (key) => {
 const startFull = async () => {
   running.value = true
   try {
-    await generateAll(route.params.id)
+    const started = await runWithBudget((force) => generateAll(route.params.id, force), '一键全流程')
+    if (!started) { running.value = false; return }
     startPolling()
   } catch (e) {
     alert('失败: ' + (e.response?.data?.detail || e.message))

@@ -68,12 +68,12 @@ async def get_project_spend(project_id: str) -> float:
 
 async def check_budget(project_id: str, step: str, unit: float) -> tuple[bool, str]:
     """生成前预算检查。返回 (是否允许, 提示信息)
-    估算本次 cost + 已花费 <= 预算才允许；超限给出降级建议。
+    估算本次 cost + 已花费 <= 预算才允许；超限不硬性阻止，由上层弹窗询问用户是否继续。
     """
     cost = estimate_cost(step, unit)
     spent = await get_project_spend(project_id)
     if spent + cost > DAILY_BUDGET:
-        hint = (f"预算不足：今日已花 ¥{spent:.2f}，本次「{step}」预计 ¥{cost:.2f}，"
-                f"超出每日限额 ¥{DAILY_BUDGET:.2f}。建议：视频步骤将降级为图文卡点模式。")
+        hint = (f"今日已花 ¥{spent:.2f}，本次「{step}」预计 ¥{cost:.2f}，"
+                f"将超过每日限额 ¥{DAILY_BUDGET:.2f}。")
         return False, hint
     return True, ""

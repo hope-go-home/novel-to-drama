@@ -33,8 +33,9 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://:123456@localhost:6381/0")
 # 质量评估：是否启用 LLM 语义一致性打分（会消耗 token，受成本控制）
 ENABLE_LLM_QUALITY = os.getenv("ENABLE_LLM_QUALITY", "true").lower() in ("1", "true", "yes")
 
-# 成本控制：每日预算（元，全项目合计），超过后阻止新的高成本生成
-DAILY_BUDGET = float(os.getenv("DAILY_BUDGET", "30"))
+# 成本控制：每日预算（元，全项目合计），超过时由前端弹窗询问用户是否继续；
+# 用户选择继续则照常生成并累计成本，选择停止则本次不启动
+DAILY_BUDGET = float(os.getenv("DAILY_BUDGET", "100"))
 
 # 成本价格表（元/单位）
 COST_TABLE = {

@@ -17,20 +17,21 @@ export const updateProjectSettings = (id, data) => api.post(`/projects/${id}/set
 export const getLogs = (limit = 100, projectId = '') => api.get('/logs', { params: { limit, project_id: projectId } })
 export const clearLogs = () => api.delete('/logs')
 
-// 生成流程
-export const generateAll = (id) => api.post(`/projects/${id}/generate-all`)
+// 生成流程（force=true 表示用户已确认超预算继续）
+const withForce = (force) => (force ? { force: true } : {})
+export const generateAll = (id, force) => api.post(`/projects/${id}/generate-all`, null, { params: withForce(force) })
 export const stopProject = (id) => api.post(`/projects/${id}/stop`)
 export const importCharacters = (targetId, sourceId) => api.post(`/projects/${targetId}/import-characters/${sourceId}`)
-export const generateScript = (id) => api.post(`/projects/${id}/generate-script`)
-export const generateCharacters = (id) => api.post(`/projects/${id}/generate-characters`)
-export const generateShots = (id) => api.post(`/projects/${id}/generate-shots`)
-export const generateAudio = (id) => api.post(`/projects/${id}/generate-audio`)
-export const generateVideos = (id) => api.post(`/projects/${id}/generate-videos`)
-export const composeVideo = (id) => api.post(`/projects/${id}/compose`)
+export const generateScript = (id, force) => api.post(`/projects/${id}/generate-script`, null, { params: withForce(force) })
+export const generateCharacters = (id, force) => api.post(`/projects/${id}/generate-characters`, null, { params: withForce(force) })
+export const generateShots = (id, force) => api.post(`/projects/${id}/generate-shots`, null, { params: withForce(force) })
+export const generateAudio = (id, force) => api.post(`/projects/${id}/generate-audio`, null, { params: withForce(force) })
+export const generateVideos = (id, force) => api.post(`/projects/${id}/generate-videos`, null, { params: withForce(force) })
+export const composeVideo = (id, force) => api.post(`/projects/${id}/compose`, null, { params: withForce(force) })
 
 // 成本 / 质量 / 单镜重做
 export const getBudget = (id) => api.get(`/projects/${id}/budget`)
-export const redoSingleShot = (id, index) => api.post(`/projects/${id}/shot/${index}/redo`)
+export const redoSingleShot = (id, index, force) => api.post(`/projects/${id}/shot/${index}/redo`, null, { params: withForce(force) })
 export const getTaskStatus = (id) => api.get(`/projects/${id}/task`)
 
 // 删除资产

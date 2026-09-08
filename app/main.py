@@ -119,24 +119,35 @@ async def _record_usage(project_id: str, step: str, unit: float):
 
 
 async def _budget_guard(project_id: str, step: str, unit: float) -> bool:
-    """生成前预算检查：返回 True=允许；False=超预算，自动把步骤置为错误并提示降级"""
+    """预算检查（纯判断，不修改项目状态）：True=允许；False=本次将超过每日限额"""
     try:
         from .engines.cost_engine import check_budget
-        ok, hint = await check_budget(project_id, step, unit)
-        if not ok:
-            add_log("ERROR", "cost", hint, project_id)
-            try:
-                project = _load_project(project_id)
-                project.status = ProjectStatus.ERROR
-                project.error_message = hint
-                _save_project(project)
-            except Exception:
-                pass
-            return False
-        return True
+        ok, _hint = await check_budget(project_id, step, unit)
+        return ok
     except Exception as e:
         logger.warning(f"预算检查失败（放行）: {e}")
         return True
+
+
+async def _budget_confirm_payload(project_id: str, step: str, unit: float) -> dict | None:
+    """若本次生成将超过每日预算，返回供前端弹窗确认的响应体；未超预算返回 None"""
+    from .engines.cost_engine import get_project_spend, estimate_cost
+    try:
+        ok = await _budget_guard(project_id, step, unit)
+        if ok:
+            return None
+        spend = round(await get_project_spend(project_id), 2)
+        est = round(estimate_cost(step, unit), 2)
+        return {
+            "code": "budget_confirm",
+            "message": f"本次操作预计花费 ¥{est:.2f}，今日已累计 ¥{spend:.2f}，将超过每日限额 ¥{DAILY_BUDGET:.2f}。是否继续？",
+            "spend": spend,
+            "estimated": est,
+            "daily_budget": DAILY_BUDGET,
+        }
+    except Exception as e:
+        logger.warning(f"预算确认计算失败（放行）: {e}")
+        return None
 
 
 async def _assess_and_save_quality(project_id: str, shots, image_paths) -> list:
@@ -420,6 +431,8 @@ async def _run_script_generation(project_id: str):
         project.status = ProjectStatus.SCRIPT_DONE
         _save_project(project)
         add_log("SUCCESS", "script", f"剧本生成完成: {project.script.title}", project_id)
+        # 成本记账：按小说字数估算 token（约 1 字 ≈ 1 token 的粗估）
+        await _record_usage(project_id, "script", round(len(project.novel_text) / 1000.0, 3))
     except asyncio.CancelledError:
         project.status = ProjectStatus.ERROR
         project.error_message = "用户手动停止"
@@ -434,10 +447,11 @@ async def _run_script_generation(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/generate-script")
-async def generate_script_api(project_id: str):
+async def generate_script_api(project_id: str, force: bool = False):
     _load_project(project_id)
-    if not await _budget_guard(project_id, "script", 2.0):
-        return {"message": "预算不足，已阻止"}
+    block = await _budget_confirm_payload(project_id, "script", 2.0)
+    if block and not force:
+        return block
     await _launch_task(project_id, "script", _run_script_generation(project_id))
     return {"message": "剧本生成已启动"}
 
@@ -459,6 +473,8 @@ async def _run_character_generation(project_id: str):
         project.status = ProjectStatus.CHARACTERS_DONE
         _save_project(project)
         add_log("SUCCESS", "character", f"角色生成完成: {len(project.characters)} 个角色", project_id)
+        # 成本记账：角色三视图按角色数计（每角色3张图）
+        await _record_usage(project_id, "characters", float(len(project.characters) * 3))
     except asyncio.CancelledError:
         project.status = ProjectStatus.ERROR
         project.error_message = "用户手动停止"
@@ -473,11 +489,13 @@ async def _run_character_generation(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/generate-characters")
-async def generate_characters_api(project_id: str):
+async def generate_characters_api(project_id: str, force: bool = False):
     project = _load_project(project_id)
     n = len(project.script.characters) if project.script else 0
-    if not await _budget_guard(project_id, "characters", float(max(n, 1))):
-        return {"message": "预算不足，已阻止"}
+    # 角色三视图每角色 3 张图，按 n*3 估算成本
+    block = await _budget_confirm_payload(project_id, "characters", float(max(n, 1) * 3))
+    if block and not force:
+        return block
     await _launch_task(project_id, "characters", _run_character_generation(project_id))
     return {"message": "角色生成已启动"}
 
@@ -495,10 +513,6 @@ async def _run_shot_generation(project_id: str):
     _save_project(project)
     all_shots = _get_all_shots(project)
     add_log("INFO", "shot", f"开始生成分镜画面: {len(all_shots)} 个镜头", project_id)
-
-    # 预算检查（生图估算：按全部镜头张数；已有画面会跳过，此处为上限估算）
-    if not await _budget_guard(project_id, "shots", float(len(all_shots))):
-        return
 
     # 加载已有进度
     existing = _load_json(project_id, "shot_images.json") or []
@@ -547,8 +561,12 @@ async def _run_shot_generation(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/generate-shots")
-async def generate_shots_api(project_id: str):
-    _load_project(project_id)
+async def generate_shots_api(project_id: str, force: bool = False):
+    project = _load_project(project_id)
+    n = len(_get_all_shots(project))
+    block = await _budget_confirm_payload(project_id, "shots", float(max(n, 1)))
+    if block and not force:
+        return block
     await _launch_task(project_id, "shots", _run_shot_generation(project_id))
     return {"message": "分镜画面生成已启动"}
 
@@ -629,11 +647,16 @@ async def _run_audio_generation(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/generate-audio")
-async def generate_audio_api(project_id: str):
+async def generate_audio_api(project_id: str, force: bool = False):
     project = _load_project(project_id)
     if project.use_tts is False:
         add_log("WARN", "audio", "当前为 AI 原声模式，跳过语音生成", project_id)
         return {"message": "AI 原声模式无需配音"}
+    all_shots = _get_all_shots(project)
+    chars = sum(len(d.line) for s in all_shots for d in s.dialogues if d.line) + sum(len(s.narrator or "") for s in all_shots)
+    block = await _budget_confirm_payload(project_id, "audio", round(chars / 1000.0, 3))
+    if block and not force:
+        return block
     await _launch_task(project_id, "audio", _run_audio_generation(project_id))
     return {"message": "语音生成已启动"}
 
@@ -651,10 +674,6 @@ async def _run_video_generation(project_id: str):
     _save_project(project)
     all_shots = _get_all_shots(project)
     add_log("INFO", "video", f"开始生成 AI 视频: {len(all_shots)} 个镜头", project_id)
-
-    # 预算检查：视频最贵，按镜头数×5秒估算
-    if not await _budget_guard(project_id, "video", float(len(all_shots) * 5)):
-        return
 
     try:
         image_paths = _load_json(project_id, "shot_images.json") or []
@@ -681,8 +700,12 @@ async def _run_video_generation(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/generate-videos")
-async def generate_videos_api(project_id: str):
-    _load_project(project_id)
+async def generate_videos_api(project_id: str, force: bool = False):
+    project = _load_project(project_id)
+    n = len(_get_all_shots(project))
+    block = await _budget_confirm_payload(project_id, "video", float(n * 5))
+    if block and not force:
+        return block
     await _launch_task(project_id, "video", _run_video_generation(project_id))
     return {"message": "AI 视频生成已启动"}
 
@@ -862,9 +885,6 @@ async def _run_full_pipeline(project_id: str):
             project.status = ProjectStatus.VIDEO_GENERATING
             _save_project(project)
             all_shots = _get_all_shots(project)
-            # 视频生成前预算检查
-            if not await _budget_guard(project_id, "video", float(len(all_shots) * 5)):
-                return
             try:
                 from .engines.video_engine import generate_video_clips
                 video_paths = await generate_video_clips(all_shots, image_paths, project_dir, project_id, audio_paths)
@@ -898,7 +918,7 @@ async def _run_full_pipeline(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/generate-all")
-async def generate_all_api(project_id: str):
+async def generate_all_api(project_id: str, force: bool = False):
     project = _load_project(project_id)
     if project.status not in [ProjectStatus.CREATED, ProjectStatus.ERROR,
                                ProjectStatus.SCRIPT_DONE, ProjectStatus.CHARACTERS_DONE,
@@ -906,6 +926,11 @@ async def generate_all_api(project_id: str):
                                ProjectStatus.VIDEO_DONE]:
         if project.status == ProjectStatus.DONE:
             raise HTTPException(status_code=400, detail="项目已完成")
+    # 一键全流程大头是视频生成，以其估算做预算确认门槛
+    n = len(_get_all_shots(project))
+    block = await _budget_confirm_payload(project_id, "video", float(n * 5))
+    if block and not force:
+        return block
     await _launch_task(project_id, "all", _run_full_pipeline(project_id))
     return {"message": "全流程生成已启动"}
 
@@ -1060,11 +1085,15 @@ async def _run_single_shot_redo(project_id: str, index: int):
 
 
 @app.post("/api/projects/{project_id}/shot/{index}/redo")
-async def redo_single_shot(project_id: str, index: int):
+async def redo_single_shot(project_id: str, index: int, force: bool = False):
     """单镜头局部重做（画面+音频+视频，复用其余镜头缓存）"""
     _load_project(project_id)
     if project_id in _running_tasks:
         raise HTTPException(status_code=400, detail="当前有任务运行中，请先停止")
+    # 单镜重做会生成 1 段视频（最贵），超预算需用户确认
+    block = await _budget_confirm_payload(project_id, "video", 6.0)
+    if block and not force:
+        return block
     await _launch_task(project_id, "redo", _run_single_shot_redo(project_id, index))
     return {"message": f"镜头 {index} 重做已启动"}
 
