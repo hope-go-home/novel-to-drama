@@ -89,19 +89,6 @@ class CharacterViews(BaseModel):
     back_image: str = Field(default="", description="背面图路径")
 
 
-# ============ 质量评估 ============
-
-class ShotQuality(BaseModel):
-    """单镜头生成画面质量评估结果"""
-    index: int = Field(description="镜头序号")
-    passed: bool = Field(default=True, description="是否通过质量闸门")
-    score: float = Field(default=0, description="综合得分 0-100")
-    level: str = Field(default="high", description="high / medium / low")
-    checks: dict = Field(default={}, description="各检查项结果")
-    reason: str = Field(default="", description="未通过原因简述")
-    checked_at: str = Field(default="", description="检查时间")
-
-
 # ============ 项目相关 ============
 
 class ProjectCreate(BaseModel):

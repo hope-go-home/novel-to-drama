@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import asyncio
 from .config import OUTPUT_DIR, ensure_project_dir, DAILY_BUDGET
-from .models import Project, ProjectCreate, ProjectStatus, Script, ShotQuality
+from .models import Project, ProjectCreate, ProjectStatus, Script
 from .utils.logger import add_log, get_logs, clear_logs, logger
 from .utils.event_bus import wait_log_update
 from .utils.task_registry import set_task, get_task, clear_task
@@ -163,24 +163,6 @@ async def _budget_confirm_payload(project_id: str, step: str, unit: float) -> di
         return None
 
 
-async def _assess_and_save_quality(project_id: str, shots, image_paths) -> list:
-    """对已生成的分镜画面做质量评估并写入 shot_quality.json"""
-    from .engines.quality_engine import assess_shot_images
-    try:
-        qualities = await assess_shot_images(shots, image_paths)
-        data = [q.model_dump() if q else None for q in qualities]
-        _save_json(project_id, "shot_quality.json", data)
-        low = [i for i, q in enumerate(qualities) if q and not q.passed]
-        if low:
-            add_log("WARN", "quality", f"质量检查完成，{len(low)} 个画面未通过闸门: {low}", project_id)
-        else:
-            add_log("SUCCESS", "quality", f"质量检查通过: {sum(1 for q in qualities if q)} 个画面", project_id)
-        return qualities
-    except Exception as e:
-        logger.warning(f"质量评估失败（跳过）: {e}")
-        return []
-
-
 # ============ 项目管理 ============
 
 @app.post("/api/projects")
@@ -272,9 +254,6 @@ async def get_project(project_id: str):
     # 检查视频文件是否存在
     video_paths = _load_json(project_id, "video_paths.json") or []
     d["video_paths"] = [p if p and Path(p).exists() else None for p in video_paths]
-
-    # 质量评估结果（分镜画面质量徽标）
-    d["shot_qualities"] = _load_json(project_id, "shot_quality.json") or []
 
     # 成本统计（当日已花费）
     try:
@@ -380,7 +359,7 @@ async def delete_script(project_id: str):
     project.status = ProjectStatus.CREATED
     _save_project(project)
     # 删除相关文件
-    for f in ["shot_images.json", "audio_paths.json", "video_paths.json", "shot_quality.json"]:
+    for f in ["shot_images.json", "audio_paths.json", "video_paths.json"]:
         p = OUTPUT_DIR / project_id / f
         if p.exists():
             p.unlink()
@@ -412,9 +391,6 @@ async def delete_shots(project_id: str):
     p = OUTPUT_DIR / project_id / "shot_images.json"
     if p.exists():
         p.unlink()
-    pq = OUTPUT_DIR / project_id / "shot_quality.json"
-    if pq.exists():
-        pq.unlink()
     add_log("WARN", "shot", "删除全部分镜画面", project_id)
     return {"message": "分镜画面已删除"}
 
@@ -473,11 +449,6 @@ async def delete_single_shot(project_id: str, index: int):
     if index < len(images):
         images[index] = None
         _save_json(project_id, "shot_images.json", images)
-    # 同步清除对应质量记录，避免残留无图的旧徽标
-    qualities = _load_json(project_id, "shot_quality.json") or []
-    if index < len(qualities):
-        qualities[index] = None
-        _save_json(project_id, "shot_quality.json", qualities)
     add_log("WARN", "shot", f"删除分镜 {index}", project_id)
     return {"message": f"分镜 {index} 已删除"}
 
@@ -637,8 +608,6 @@ async def _run_shot_generation(project_id: str):
         _save_json(project_id, "shot_images.json", image_paths)
         ok_count = sum(1 for p in image_paths if p is not None)
         add_log("SUCCESS", "shot", f"分镜画面完成: {ok_count}/{len(all_shots)} 成功", project_id)
-        # 质量闸门：评估本次新增画面，标记低质镜头（低质不进视频环节）
-        await _assess_and_save_quality(project_id, all_shots, image_paths)
         # 成本记账：生图按成功张数
         await _record_usage(project_id, "shots", float(ok_count))
     except asyncio.CancelledError:
@@ -908,8 +877,7 @@ async def _run_full_pipeline(project_id: str):
             _save_json(project_id, "shot_images.json", image_paths)
             project.status = ProjectStatus.SHOTS_DONE
             _save_project(project)
-            # 质量闸门 + 成本记账
-            await _assess_and_save_quality(project_id, all_shots, image_paths)
+            # 成本记账
             await _record_usage(project_id, "shots", float(sum(1 for p in image_paths if p)))
         else:
             image_paths = existing_images
@@ -1137,18 +1105,7 @@ async def _run_single_shot_redo(project_id: str, index: int):
             images.extend([None] * (index - len(images) + 1))
             images[index] = image_path
         _save_json(project_id, "shot_images.json", images)
-        # 单镜质量复检
-        from .engines.quality_engine import assess_shot_image
-        q = await assess_shot_image(shot, index, image_path)
-        qualities = _load_json(project_id, "shot_quality.json") or []
-        if index < len(qualities):
-            qualities[index] = q.model_dump()
-        else:
-            qualities.extend([None] * (index - len(qualities) + 1))
-            qualities[index] = q.model_dump()
-        _save_json(project_id, "shot_quality.json", qualities)
-        add_log(("SUCCESS" if q.passed else "WARN"), "redo",
-                f"镜头 {index} 画面重做完成，质量 {'通过' if q.passed else f'偏低({q.score:.0f}分)'}，得分 {q.score:.0f}", project_id)
+        add_log("SUCCESS", "redo", f"镜头 {index} 画面重做完成", project_id)
         # 3) 重生成该镜头音频（TTS 模式）
         if project.use_tts:
             from .engines.audio_engine import generate_shot_audio

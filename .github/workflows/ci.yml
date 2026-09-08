@@ -26,7 +26,7 @@ jobs:
           # 只装 main 顶层 import 所需的核心依赖（AI 引擎在运行时才 import，
           # 需要真实 API key 与火山 SDK，不适合在 CI 里拉取）
           pip install fastapi uvicorn httpx pydantic python-dotenv \
-                      pillow redis "sse-starlette>=2.1.0" imageio-ffmpeg
+                      redis "sse-starlette>=2.1.0" imageio-ffmpeg
 
       - name: Syntax check (compileall)
         run: python -m compileall -q app ui.py

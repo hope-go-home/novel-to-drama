@@ -166,10 +166,6 @@
             <div v-if="src" @click="lightbox = img(src)">
                 <img :src="img(src)" :alt="'镜头 ' + (i+1)" />
               <div class="shot-label">{{ i + 1 }}</div>
-              <div v-if="qualityOf(i)" :class="['quality-badge', 'ql-' + qualityOf(i).level]"
-                   :title="qualityReason(i)">
-                {{ qualityOf(i).score }}<small>分</small>
-              </div>
             </div>
             <div v-else class="shot-empty">
               <span>{{ i + 1 }}</span>
@@ -362,7 +358,6 @@ const videoPaths = ref([])
 const expandedScenes = reactive({})
 const lightbox = ref(null)
 const logs = ref([])
-const qualities = ref([])
 let pollTimer = null
 let logTimer = null
 let sseSource = null
@@ -423,7 +418,6 @@ const loadProject = async () => {
     shotImages.value = data.shot_images || []
     audioPaths.value = data.audio_paths || []
     videoPaths.value = data.video_paths || []
-    qualities.value = data.shot_qualities || []
   } catch (e) { console.error(e) }
 }
 
@@ -538,14 +532,6 @@ const budgetPct = computed(() => {
   return Math.min(100, Math.round(((project.value.spend || 0) / b) * 100))
 })
 const budgetWarn = computed(() => budgetPct.value >= 80)
-
-// ---- 质量徽标 ----
-const qualityOf = (index) => qualities.value?.[index] || null
-const qualityReason = (index) => {
-  const q = qualityOf(index)
-  if (!q) return ''
-  return `画面质量 ${q.score} 分 · ${q.reason || '通过'}`.trim()
-}
 
 const handleRedoShot = async (index) => {
   if (!confirm(`重新生成镜头 ${index + 1}？将重做该镜的画面/音频/视频并重新合成，其余镜头保留。`)) return
@@ -1180,25 +1166,6 @@ onUnmounted(() => {
   background: var(--bg-hover);
   color: var(--text-light);
 }
-
-/* 质量徽标（右上角，表意 = 该镜画面是否达到闸门标准） */
-.quality-badge {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  padding: 1px 8px;
-  border-radius: 100px;
-  font-size: 11px;
-  font-weight: 700;
-  color: white;
-  line-height: 1.6;
-  pointer-events: none;
-  font-variant-numeric: tabular-nums;
-}
-.quality-badge small { font-weight: 500; opacity: .85; }
-.quality-badge.ql-high { background: var(--success); }
-.quality-badge.ql-medium { background: var(--warning); }
-.quality-badge.ql-low { background: var(--error); }
 
 /* 卡片悬浮工具（重做 / 删除） */
 .shot-tools {
