@@ -34,11 +34,12 @@ jobs:
       - name: Import app + route table
         run: python -c "import app.main; print('import OK, routes =', len(app.main.app.routes))"
 
-      - name: Import new modules (redis degrade / cost / quality / registry)
+      - name: Import new modules (redis / cost / validator)
         run: |
-          python -c "from app.utils import redis_client, task_registry, event_bus, ffmpeg_utils; print('utils OK')"
-          python -c "from app.engines import cost_engine, quality_engine; print('engines OK')"
+          python -c "from app.utils import redis_client, task_registry, event_bus, ffmpeg_utils, script_validator; print('utils OK')"
+          python -c "from app.engines import cost_engine, chat_engine; print('engines OK')"
           python -c "from app.engines.cost_engine import estimate_cost; assert estimate_cost('video', 40) > 0; print('cost OK')"
+          python -c "from app.utils.script_validator import validate_script; print('validator OK')"
 
   frontend:
     name: Frontend build
