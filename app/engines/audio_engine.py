@@ -8,7 +8,7 @@ from ..config import VOLC_TTS_APP_ID, VOLC_TTS_ACCESS_TOKEN, VOLC_TTS_RESOURCE_I
 from ..models import Shot, CharacterInfo
 from ..utils.prompts import EMOTION_VOICE_MAP
 
-# 可用音色库（seed-tts-2.0 已验证可用的音色）
+# 可用音色库（seed-tts-2.0 / ICL 已验证可用的音色）
 VOICE_PRESETS = {
     # 女性音色
     "female_young": "ICL_uranus_zh_female_chunzhenshaonv_tob",      # 纯真少女
@@ -16,6 +16,15 @@ VOICE_PRESETS = {
     "female_intellectual": "zh_female_zhixingnv_uranus_bigtts",     # 知性女
     "female_charming": "zh_female_chanmeinv_uranus_bigtts",         # 妩媚女
     "female_mature": "zh_female_cancan_uranus_bigtts",              # 灿灿（成熟）
+    "female_wenroumama": "zh_female_wenroumama_uranus_bigtts",      # 温柔妈妈
+    "female_jitangmei": "zh_female_jitangmei_uranus_bigtts",        # 鸡汤美（温暖治愈）
+    "female_mengyatou": "zh_female_mengyatou_uranus_bigtts",        # 萌丫头
+    "female_qiaopinv": "zh_female_qiaopinv_uranus_bigtts",          # 俏皮女
+    "female_shaoergushi": "zh_female_shaoergushi_uranus_bigtts",    # 少儿故事
+    "female_popo": "zh_female_popo_uranus_bigtts",                  # 婆婆
+    "female_zhixingwenwan": "ICL_uranus_zh_female_zhixingwenwan_tob",   # 知性温婉
+    "female_tianmeihuopo": "ICL_uranus_zh_female_tianmeihuopo_tob",     # 甜美活泼
+    "female_nuanxinxuejie": "ICL_uranus_zh_female_nuanxinxuejie_tob",   # 暖心学姐
 
     # 男性音色
     "male_young": "saturn_zh_male_shuanglangshaonian_tob",         # 爽朗少年
@@ -25,9 +34,22 @@ VOICE_PRESETS = {
     "male_clingy": "ICL_uranus_zh_male_nianrennanyou_tob",          # 黏人男友
     "male_yandere": "ICL_uranus_zh_male_bingjiaonanyou_tob",        # 病娇男友
     "male_deep": "ICL_uranus_zh_male_guiyishenmi_tob",             # 诡异神秘
-
-    "narrator": "zh_female_cancan_uranus_bigtts",                  # 旁白
+    "male_wennuanahu": "zh_male_wennuanahu_uranus_bigtts",          # 温暖阿虎（温暖男声）
+    "male_liufei": "zh_male_liufei_uranus_bigtts",                  # 刘飞（青年播讲男声）
+    "male_yuanboxiaoshu": "zh_male_yuanboxiaoshu_uranus_bigtts",    # 原播小说（有声书播讲）
+    "male_youyoujunzi": "zh_male_youyoujunzi_uranus_bigtts",        # 悠悠君子（儒雅温润）
+    "male_zhengzhiqingnian": "ICL_uranus_zh_male_zhengzhiqingnian_tob",  # 正直青年
+    "male_xiaosasuixing": "ICL_uranus_zh_male_xiaosasuixing_tob",        # 潇洒随性
+    "male_youroubangzhu": "ICL_uranus_zh_male_youroubangzhu_tob",        # 优柔帮主
+    "male_nuanxintitie": "ICL_uranus_zh_male_nuanxintitie_tob",          # 暖心体贴
+    "male_lvchaxiaoge": "ICL_uranus_zh_male_lvchaxiaoge_tob",            # 绿茶小哥
+    "male_lengdanshuli": "ICL_uranus_zh_male_lengdanshuli_tob",          # 冷淡疏离
+    "male_guzhibingjiao": "ICL_uranus_zh_male_guzhibingjiao_tob",        # 固执病娇
 }
+
+# 旁白兜底音色（仅当旁白文本无任何风格特征时使用；不再固定某一角色/女声，
+# 正常情况由 choose_narrator_voice 按旁白文本风格自动匹配）
+NARRATOR_FALLBACK = "zh_female_zhixingnv_uranus_bigtts"             # 知性女（中性叙述兜底）
 
 # 角色描述关键词 → 音色类型映射
 VOICE_KEYWORDS = {
@@ -37,6 +59,15 @@ VOICE_KEYWORDS = {
     "female_charming": ["妩媚", "妖娆", "性感", "风情", "迷人", "魅惑", "冷艳"],
     "female_mature": ["成熟", "稳重", "大姐", "老妇", "母亲", "中年女"],
     "female_young": ["年轻", "少女", "活泼", "可爱", "纯真", "小姑娘", "丫头", "小女孩"],
+    "female_wenroumama": ["妈妈", "慈母", "母亲", "温柔妈", "贤惠", "疼爱", "母爱", "宝妈", "老妈", "娘亲"],
+    "female_jitangmei": ["治愈", "暖心", "鸡汤", "励志", "温暖", "知心姐姐", "正能量", "鼓励"],
+    "female_mengyatou": ["呆萌", "软萌", "迷糊", "天然呆", "萌系", "可爱风", "元气少女", "小丫头"],
+    "female_qiaopinv": ["俏皮", "古灵精怪", "机灵", "灵动", "调皮", "活泼俏皮", "鬼马", "精灵"],
+    "female_shaoergushi": ["童声", "儿童", "小朋友", "故事", "少儿", "幼儿园", "朗读"],
+    "female_popo": ["婆婆", "老婆婆", "老奶奶", "祖母", "老太", "外婆", "姥姥", "年迈女性", "慈祥老人", "高龄"],
+    "female_zhixingwenwan": ["温婉", "知性温婉", "书卷气", "端庄", "大家闺秀", "涵养", "优雅"],
+    "female_tianmeihuopo": ["甜美活泼", "活力", "明媚", "元气满满", "开心果", "灿烂"],
+    "female_nuanxinxuejie": ["学姐", "暖心大姐姐", "温柔学姐", "邻家姐姐", "照顾人", "知心姐姐"],
 
     # 男性（性格特征类，不含年龄词）
     "male_academic": ["学霸", "书呆子", "眼镜", "文弱", "学生", "校园", "同桌", "书生"],
@@ -46,6 +77,17 @@ VOICE_KEYWORDS = {
     "male_yandere": ["病娇", "偏执", "占有欲", "极端", "疯狂"],
     "male_young": ["阳光", "帅气", "小伙子", "爽朗", "少年", "青年", "二十", "小鲜肉", "活力"],
     "male_deep": ["沧桑", "佝偻", "七十", "八十", "九十", "白发", "诡异", "阴森", "邪气"],
+    "male_wennuanahu": ["温暖男", "邻家大哥哥", "踏实", "可靠", "憨厚", "温柔体贴男", "暖男"],
+    "male_liufei": ["成熟男声", "沉稳", "播音腔", "主持", "浑厚", "磁性男声"],
+    "male_yuanboxiaoshu": ["说书", "评书", "讲故事", "小说播讲", "有声书", "叙述者"],
+    "male_youyoujunzi": ["君子", "儒雅", "温润如玉", "谦谦君子", "书卷气", "彬彬有礼", "文质彬彬"],
+    "male_zhengzhiqingnian": ["正直", "正气", "刚正", "磊落", "青年才俊", "正义"],
+    "male_xiaosasuixing": ["潇洒", "随性", "不羁", "洒脱", "浪子", "痞帅", "玩世不恭"],
+    "male_youroubangzhu": ["优柔", "犹豫", "优柔寡断", "帮主", "柔中带刚"],
+    "male_nuanxintitie": ["暖心", "体贴", "细心", "温柔体贴", "暖男", "呵护", "无微不至", "贴心", "学长"],
+    "male_lvchaxiaoge": ["绿茶", "阳光学弟", "清秀少年", "小奶狗", "温柔少年", "青涩"],
+    "male_lengdanshuli": ["疏离", "清冷", "淡漠", "高岭之花", "拒人千里", "冷情"],
+    "male_guzhibingjiao": ["固执", "执拗", "偏执", "病娇", "死心眼", "钻牛角尖"],
 }
 
 # 年龄判断：明确数字年龄最优先，其次是年龄特征词
@@ -61,12 +103,13 @@ AGE_RULES = {
 }
 
 
-def _match_male_trait(desc: str, exclude: set = None) -> str:
-    """匹配男性性格特征，返回音色 key"""
+def _match_trait(desc: str, gender_prefix: str = None, exclude: set = None) -> str:
+    """在 VOICE_KEYWORDS 中按关键词给描述打分，返回得分最高的音色 key。
+    gender_prefix 限定只匹配该性别（'male'/'female'/None 不限）"""
     best_voice = None
     best_score = 0
     for voice_type, keywords in VOICE_KEYWORDS.items():
-        if not voice_type.startswith("male"):
+        if gender_prefix and not voice_type.startswith(gender_prefix):
             continue
         if exclude and voice_type in exclude:
             continue
@@ -77,91 +120,92 @@ def _match_male_trait(desc: str, exclude: set = None) -> str:
     return best_voice
 
 
-# 特定角色音色映射（优先级最高）
-CHARACTER_VOICE_MAP = {
-    "阿福": "ICL_uranus_zh_male_lengmonanyou_tob",      # 冷漠男声
-    "老徐头": "ICL_uranus_zh_male_guiyishenmi_tob",     # 诡异神秘男声
-}
+def _gender_from_desc(desc: str, name: str) -> str:
+    """判断描述/名字对应的性别倾向，返回 'male' / 'female'"""
+    male_keywords = ["男", "他", "男声", "阳刚", "胡须", "须发", "青年", "少年", "老头", "老汉", "爷", "叔", "哥", "弟", "公", "伯", "翁", "村长", "汉子", "小伙", "男友", "同桌", "学长", "儿"]
+    female_keywords = ["女", "她", "女声", "裙", "姑娘", "少女", "小姐", "姐", "妹", "姑", "嫂", "娘", "夫人", "太太", "丫头", "女孩", "女友", "婆", "奶奶", "妈", "母亲", "外婆", "姥姥", "祖母", "学姐", "学妹"]
 
-# 特定类型音色映射（用于年轻女角色等）
-TYPE_VOICE_MAP = {
-    "young_female": "ICL_uranus_zh_female_chunzhenshaonv_tob",  # 纯真少女
-}
+    is_male = any(w in desc for w in male_keywords)
+    is_female = any(w in desc for w in female_keywords)
+
+    if is_male != is_female:
+        return "male" if is_male else "female"
+
+    # 描述无明显性别词 → 用性格倾向词兜底
+    if any(w in desc for w in ["温柔", "甜美", "漂亮", "美丽", "可爱", "裙", "娘", "小姐"]):
+        return "female"
+    if any(w in desc for w in ["老", "瘦弱", "驼背", "须发", "四十", "五十", "六十", "七十", "八十"]):
+        return "male"
+
+    # 最后用名字特征词判断
+    female_name = any(w in name for w in ["雨", "雪", "婷", "芳", "丽", "娟", "花", "翠", "秀", "香", "兰", "梅", "玲", "瑶", "妹", "姐", "女"])
+    return "female" if female_name else "male"
 
 
 def _assign_voice(character_name: str, characters: list[CharacterInfo]) -> str:
-    """分配音色：先查特定角色映射，再查手动指定，最后自动判断"""
-    # 1. 特定角色音色映射（最高优先级）
-    if character_name in CHARACTER_VOICE_MAP:
-        return CHARACTER_VOICE_MAP[character_name]
-
+    """全自动分配音色：不写死任何"角色→音色"绑定，完全依据剧本给角色的
+    voice 字段（可选手动）/ 描述 / 音色风格 / 性格 关键词自动匹配。
+    """
+    # 1. 手动指定（来自剧本数据的 voice 字段，留空则自动判断）
     for char in characters:
         if char.name == character_name:
-            # 2. 手动指定优先（voice 字段非空则直接用）
             if char.voice and char.voice.strip():
                 return char.voice.strip()
 
             desc = char.description + " " + char.voice_style + " " + char.name + " " + char.personality
             desc = desc.lower()
 
-            # 判断性别
-            male_keywords = ["男", "他", "男声", "阳刚", "胡须", "须发", "青年", "少年", "老头", "老汉", "爷", "叔", "哥", "弟", "公", "伯", "翁", "村长", "汉子", "小伙", "男友", "同桌", "儿"]
-            female_keywords = ["女", "她", "女声", "裙", "姑娘", "少女", "小姐", "姐", "妹", "姑", "嫂", "娘", "夫人", "太太", "丫头", "女孩", "女友"]
+            gender = _gender_from_desc(desc, character_name)
 
-            is_male = any(w in desc for w in male_keywords)
-            is_female = any(w in desc for w in female_keywords)
-
-            if is_male == is_female:
-                if any(w in desc for w in ["温柔", "甜美", "漂亮", "美丽", "可爱", "裙", "娘", "小姐"]):
-                    is_female = True
-                    is_male = False
-                elif any(w in desc for w in ["老", "瘦弱", "驼背", "须发", "四十", "五十", "六十", "七十", "八十"]):
-                    is_male = True
-                    is_female = False
-                else:
-                    female_name = any(w in character_name for w in ["雨", "雪", "婷", "芳", "丽", "娟", "花", "翠", "秀", "香", "兰", "梅", "子", "玲", "瑶", "妹"])
-                    is_female = female_name
-                    is_male = not is_female
-
-            # 年轻女角色
-            if is_female and any(w in desc for w in ["年轻", "少女", "姑娘", "二十", "活泼", "可爱", "纯真"]):
-                return TYPE_VOICE_MAP["young_female"]
-
-            # 男性：先判断年龄段，再匹配性格特征
-            if is_male:
-                if any(w in desc for w in AGE_RULES["age_old_num"]):
-                    return VOICE_PRESETS["male_deep"]
-                if any(w in desc for w in AGE_RULES["age_mid_num"]):
-                    voice_key = _match_male_trait(desc, exclude={"male_deep"}) or "male_young"
-                    return VOICE_PRESETS[voice_key]
-                if any(w in desc for w in AGE_RULES["age_young_num"]):
-                    voice_key = _match_male_trait(desc, exclude={"male_deep"}) or "male_young"
-                    return VOICE_PRESETS[voice_key]
-                if any(w in desc for w in AGE_RULES["male_old"]):
+            # 男性：年龄优先，其次性格关键词；均未命中用年龄段默认
+            if gender == "male":
+                if any(w in desc for w in AGE_RULES["age_old_num"]) or any(w in desc for w in AGE_RULES["male_old"]):
                     return VOICE_PRESETS["male_deep"]
                 if any(w in desc for w in AGE_RULES["male_middle"]):
-                    voice_key = _match_male_trait(desc, exclude={"male_deep"}) or "male_young"
+                    voice_key = _match_trait(desc, gender_prefix="male", exclude={"male_deep"}) or "male_young"
                     return VOICE_PRESETS[voice_key]
-                if any(w in desc for w in AGE_RULES["male_young"]):
-                    voice_key = _match_male_trait(desc, exclude={"male_deep"}) or "male_young"
+                if any(w in desc for w in AGE_RULES["age_young_num"]) or any(w in desc for w in AGE_RULES["male_young"]):
+                    voice_key = _match_trait(desc, gender_prefix="male", exclude={"male_deep"}) or "male_young"
                     return VOICE_PRESETS[voice_key]
-                voice_key = _match_male_trait(desc) or "male_young"
+                # 无明确年龄 → 纯性格关键词匹配
+                voice_key = _match_trait(desc, gender_prefix="male") or "male_young"
                 return VOICE_PRESETS[voice_key]
-            else:
-                best_voice = None
-                best_score = 0
-                for voice_type, keywords in VOICE_KEYWORDS.items():
-                    if not voice_type.startswith("female"):
-                        continue
-                    score = sum(1 for k in keywords if k in desc)
-                    if score > best_score:
-                        best_score = score
-                        best_voice = voice_type
-                if best_voice:
-                    return VOICE_PRESETS[best_voice]
-                return VOICE_PRESETS["female_young"]
 
-    return VOICE_PRESETS["narrator"]
+            # 女性：性格关键词自动匹配（含"年轻/少女/纯真"→自动命中纯真少女音色）
+            voice_key = _match_trait(desc, gender_prefix="female") or "female_young"
+            return VOICE_PRESETS[voice_key]
+
+    # 2. 角色不在角色表（极少见）：按名字特征自动判断性别并选默认音色
+    gender = _gender_from_desc("", character_name)
+    default_key = "male_young" if gender == "male" else "female_young"
+    return VOICE_PRESETS[default_key]
+
+
+def _assign_narrator_voice(narrator_text: str) -> str:
+    """旁白音色：不固定某一女声；若旁白文本带明显风格/语气特征则自动匹配对应音色，
+    否则使用中性叙述兜底音色。"""
+    text = (narrator_text or "").lower()
+    # 磁性/沉稳/播音腔 → 刘飞类磁性叙述男声（优先于"低沉"，避免磁性被吞）
+    if any(w in text for w in ["磁性", "沉稳", "浑厚", "播音", "声线低沉", "醇厚"]):
+        return VOICE_PRESETS["male_liufei"]
+    # 低沉/沙哑/苍老的旁白 → 偏男性叙述音色；阴森悬疑 → 诡异神秘
+    if any(w in text for w in ["低沉", "沙哑", "苍老", "厚重", "缓慢"]):
+        return VOICE_PRESETS["male_deep"]
+    if any(w in text for w in ["说书", "评书", "有声书", "播讲", "讲故事"]):
+        return VOICE_PRESETS["male_yuanboxiaoshu"]
+    if any(w in text for w in ["儒雅", "娓娓道来", "文雅", "文人"]):
+        return VOICE_PRESETS["male_youyoujunzi"]
+    if any(w in text for w in ["温柔", "舒缓", "柔和"]):
+        return VOICE_PRESETS["female_gentle"]
+    if any(w in text for w in ["知性", "冷静", "理性", "客观"]):
+        return VOICE_PRESETS["female_intellectual"]
+    if any(w in text for w in ["温暖", "治愈", "励志"]):
+        return VOICE_PRESETS["female_jitangmei"]
+    if any(w in text for w in ["激昂", "热血", "紧张", "急促"]):
+        return VOICE_PRESETS["female_young"]
+    if any(w in text for w in ["童趣", "少儿", "儿童", "童话"]):
+        return VOICE_PRESETS["female_shaoergushi"]
+    return NARRATOR_FALLBACK
 
 
 async def _synthesize_speech(
@@ -283,7 +327,7 @@ async def generate_shot_audio(
         else:
             result["narrator_audio"] = await _synthesize_speech(
                 text=shot.narrator,
-                voice_id=VOICE_PRESETS["narrator"],
+                voice_id=_assign_narrator_voice(shot.narrator),
                 emotion="平静",
                 output_path=output_path,
             )
