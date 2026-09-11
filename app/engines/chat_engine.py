@@ -73,14 +73,24 @@ def _parse_json(content: str) -> dict:
         return json.loads(m.group())
 
 
-def _build_messages(script: dict, instruction: str, feedback: str = "") -> list[dict]:
-    """构造消息。feedback 非空时作为前一轮校验失败的原因要求修正"""
+def _build_messages(script: dict, instruction: str, feedback: str = "", history: list = None) -> list[dict]:
+    """构造消息。feedback 非空时作为前一轮校验失败的原因要求修正；history 为历史对话记录"""
     system = CHAT_SYSTEM_PROMPT.format(max_chars=SHOT_MAX_CHARS, max_sec=int(SHOT_MAX_SEC))
     prompt = (
         "当前分镜剧本（JSON）：\n```json\n"
         f"{json.dumps(script, ensure_ascii=False, indent=2)}\n```\n\n"
         f"用户要求：{instruction}\n"
     )
+    # 注入历史对话，帮助理解上下文（仅参考，不要求复述）
+    if history:
+        lines = []
+        for h in history[-8:]:
+            role = "用户" if (h.get("role") == "user") else "助手"
+            txt = (h.get("text") or h.get("content") or "").strip()
+            if txt:
+                lines.append(f"- {role}：{txt[:300]}")
+        if lines:
+            prompt += "\n历史对话记录（仅供理解上下文，不要复述，也不要输出它们）：\n" + "\n".join(lines) + "\n"
     if feedback:
         prompt += f"\n你上一轮的修改未通过校验，原因如下，请据此修正后重新输出完整 JSON：\n{feedback}\n"
     prompt += "\n请直接输出修改后的完整 JSON 剧本："
@@ -90,8 +100,10 @@ def _build_messages(script: dict, instruction: str, feedback: str = "") -> list[
     ]
 
 
-async def ai_revise_script(script: dict, instruction: str, max_retry: int = 2) -> dict:
+async def ai_revise_script(script: dict, instruction: str, max_retry: int = 2, history: list = None) -> dict:
     """用 LLM 修改剧本，并强制时长约束。
+
+    history: 之前的对话记录（[{role,text}]），用于多轮上下文。
 
     返回：
     {
@@ -105,7 +117,7 @@ async def ai_revise_script(script: dict, instruction: str, max_retry: int = 2) -
     feedback = ""
 
     for _ in range(max_retry + 1):
-        messages = _build_messages(script, instruction, feedback)
+        messages = _build_messages(script, instruction, feedback, history)
         content = await asyncio.to_thread(_llm_chat, messages)
         try:
             revised = _parse_json(content)

@@ -256,6 +256,22 @@
         </div>
 
         <div class="ai-body">
+          <!-- 历史对话（持久化，关闭再打开不丢失） -->
+          <div v-if="aiHistory.length" class="ai-history">
+            <div class="ai-history-hd">
+              <span>历史对话</span>
+              <button class="ai-history-clear" @click="clearAiHistory">清空</button>
+            </div>
+            <div
+              v-for="(m, i) in aiHistory"
+              :key="i"
+              :class="['ai-hist-item', 'ai-hist-' + m.role]"
+            >
+              <span class="ai-hist-role">{{ m.role === 'user' ? '我' : (m.role === 'system' ? '系统' : 'AI') }}</span>
+              <span class="ai-hist-text">{{ m.text }}</span>
+            </div>
+          </div>
+
           <!-- 建议输入 -->
           <div class="ai-chips">
             <button
@@ -323,7 +339,7 @@
                 v-show="resetStepApi[s.key]"
                 class="btn btn-outline btn-sm"
                 :disabled="running"
-                @click="doRunStep(s.key)"
+                @click="rerunStep(s.key)"
               >重跑「{{ s.label }}」</button>
             </div>
             <button class="btn btn-ghost btn-sm ai-rerun-later" @click="aiOpen = false">暂时不重跑</button>
@@ -435,7 +451,7 @@ const loadFinalVideo = async () => {
   }
 }
 
-// ---- AI 剧本助手 ----
+// ---- AI 剧本助手（保留历史对话）----
 const aiOpen = ref(false)
 const aiInput = ref('')
 const aiBusy = ref(false)
@@ -443,17 +459,37 @@ const aiResult = ref(null)      // {before,after,revised,warnings,changed_shots}
 const aiDirty = ref(true)       // 建议尚未应用
 const aiMsg = ref('')
 const aiMsgType = ref('ok')     // ok / warn / err
+const aiHistory = ref([])       // [{role:'user'|'assistant'|'system', text, ts}]
 const aiPresets = [
   '把所有超过 9.5s 的镜头拆分或精简到 45 字以内',
   '把旁白整体写得简洁一些，控制每镜时长',
   '给台词较多的一镜加上动作描述，并精简对白',
 ]
 
+const aiHistoryKey = () => `ai_hist_${route.params.id}`
+const loadAiHistory = () => {
+  try {
+    const raw = localStorage.getItem(aiHistoryKey())
+    aiHistory.value = raw ? JSON.parse(raw) : []
+  } catch (e) { aiHistory.value = [] }
+}
+const saveAiHistory = () => {
+  try { localStorage.setItem(aiHistoryKey(), JSON.stringify(aiHistory.value.slice(-50))) } catch (e) {}
+}
+const pushAiMsg = (role, text) => {
+  if (!text) return
+  aiHistory.value.push({ role, text, ts: Date.now() })
+  if (aiHistory.value.length > 50) aiHistory.value = aiHistory.value.slice(-50)
+  saveAiHistory()
+}
+const clearAiHistory = () => {
+  aiHistory.value = []
+  try { localStorage.removeItem(aiHistoryKey()) } catch (e) {}
+}
+
 const openAiAssistant = () => {
   aiOpen.value = true
-  aiResult.value = null
-  aiDirty.value = true
-  aiMsg.value = ''
+  loadAiHistory()
 }
 
 const aiIssues = computed(() => {
@@ -475,16 +511,18 @@ const aiIssues = computed(() => {
 
 const handleAiChat = async () => {
   if (!aiInput.value.trim()) return
+  const instruction = aiInput.value.trim()
+  const historySnapshot = aiHistory.value.map(m => ({ role: m.role, text: m.text }))
   aiBusy.value = true
   aiMsg.value = ''
   aiMsgType.value = 'ok'
   aiResult.value = null
   try {
-    const { data } = await aiChatScript(route.params.id, aiInput.value.trim())
+    const { data } = await aiChatScript(route.params.id, instruction, false, historySnapshot)
     if (data.code === 'budget_confirm') {
       const go = window.confirm(`${data.message}\n\n继续将消耗少量 token 用于 AI 改写。`)
       if (!go) { aiBusy.value = false; return }
-      const { data: forced } = await aiChatScript(route.params.id, aiInput.value.trim(), true)
+      const { data: forced } = await aiChatScript(route.params.id, instruction, true, historySnapshot)
       data.code = undefined
       Object.assign(data, forced)
     }
@@ -492,10 +530,13 @@ const handleAiChat = async () => {
     aiDirty.value = true
     aiMsg.value = '已生成修改建议，请核对下方时长诊断后点击「应用此版本」。'
     aiMsgType.value = 'ok'
+    pushAiMsg('user', instruction)
+    pushAiMsg('assistant', `生成修改建议：镜头 ${data.before?.shots ?? '?'} → ${data.after?.shots ?? '?'}，总朗读 ${data.before?.total_chars ?? '?'} → ${data.after?.total_chars ?? '?'} 字`)
     aiInput.value = ''
   } catch (e) {
     aiMsg.value = '改写失败：' + (e.response?.data?.detail || e.message)
     aiMsgType.value = 'err'
+    pushAiMsg('system', '改写失败：' + (e.response?.data?.detail || e.message))
   } finally {
     aiBusy.value = false
   }
@@ -516,6 +557,7 @@ const handleAiApply = async () => {
     aiDirty.value = false
     aiMsg.value = '已应用（已备份旧剧本）。旧分镜/语音/视频仍保留供参考；需要同步时，删除对应资产后点击步骤重跑即可。'
     aiMsgType.value = 'ok'
+    pushAiMsg('system', `已应用修改：镜头 ${beforeCount} → ${afterCount}`)
     await loadProject()
   } catch (e) {
     aiMsg.value = '应用失败：' + (e.response?.data?.detail || e.message)
@@ -625,7 +667,7 @@ const runWithBudget = async (fn, label) => {
   return true
 }
 
-// 重跑某步：先清该步旧产物，再全量重建（AI 改剧本后可单独挑要重跑的步骤）
+// 重跑某步：弹窗让用户选择「增量补全」或「清空重建」
 const resetStepApi = {
   characters: deleteCharacters,
   shots: deleteShots,
@@ -634,7 +676,16 @@ const resetStepApi = {
   compose: deleteOutput,
 }
 
-const doRunStep = async (key) => {
+const chooseRerunMode = (label) => {
+  const rebuild = window.confirm(
+    `重跑「${label}」\n\n【确定】= 清空重建：删除该步骤旧产物，全部重做\n【取消】= 增量补全：已存在的跳过，仅补缺失`
+  )
+  if (rebuild) return 'rebuild'
+  const incremental = window.confirm(`「${label}」将执行「增量补全」：不删除已存在产物，仅生成缺失部分。\n\n确认继续？`)
+  return incremental ? 'incremental' : null
+}
+
+const doRunStep = async (key, mode = 'incremental') => {
   if (running.value) {
     alert('当前有任务正在运行，请先停止或等待完成')
     return false
@@ -642,7 +693,7 @@ const doRunStep = async (key) => {
   running.value = true
   try {
     const reset = resetStepApi[key]
-    if (reset) {
+    if (mode === 'rebuild' && reset) {
       try { await reset(route.params.id) } catch (e) {}
     }
     const apiFn = stepApi[key]
@@ -664,9 +715,9 @@ const rerunStep = async (key) => {
     return
   }
   const label = steps.value.find(s => s.key === key)?.label
-  const extra = resetStepApi[key] ? '\n将清空该步骤已生成的旧产物并全量重建。' : ''
-  if (!confirm(`重跑「${label}」？${extra}`)) return
-  await doRunStep(key)
+  const mode = chooseRerunMode(label)
+  if (!mode) return
+  await doRunStep(key, mode)
 }
 
 const startFull = async () => {
@@ -802,6 +853,7 @@ const startPolling = () => {
 onMounted(async () => {
   await loadProject()
   await loadLogs()
+  loadAiHistory()
   // 已完成项目：初始即拉取最终视频
   if (project.value.status === 'done') {
     await loadFinalVideo()
@@ -1370,6 +1422,44 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 12px;
 }
+.ai-history {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.ai-history-hd {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.ai-history-clear {
+  background: none;
+  border: none;
+  color: var(--text-light);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ai-history-clear:hover { color: var(--error); }
+.ai-hist-item {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.ai-hist-item:last-child { border-bottom: none; }
+.ai-hist-role { flex-shrink: 0; font-weight: 600; }
+.ai-hist-user .ai-hist-role { color: var(--primary); }
+.ai-hist-assistant .ai-hist-role { color: var(--success); }
+.ai-hist-system .ai-hist-role { color: var(--warning); }
+.ai-hist-text { color: var(--text-dim); word-break: break-word; }
 .ai-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .ai-chip {
   font-size: 11px;

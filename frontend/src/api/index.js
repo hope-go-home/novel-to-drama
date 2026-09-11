@@ -41,7 +41,7 @@ export const redoSingleShot = (id, index, force) => api.post(`/projects/${id}/sh
 export const getTaskStatus = (id) => api.get(`/projects/${id}/task`)
 
 // AI 剧本助手
-export const aiChatScript = (id, instruction, force) => slow.post(`/projects/${id}/chat`, { instruction, force })
+export const aiChatScript = (id, instruction, force, history) => slow.post(`/projects/${id}/chat`, { instruction, force, history: history || [] })
 export const applyScript = (id, script) => slow.post(`/projects/${id}/script/apply`, { script })
 
 // 删除资产

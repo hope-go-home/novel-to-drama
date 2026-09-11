@@ -314,7 +314,7 @@ async def ai_chat_script(project_id: str, body: dict):
         return block
 
     try:
-        result = await ai_revise_script(current, instruction)
+        result = await ai_revise_script(current, instruction, history=body.get("history") or [])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -586,10 +586,12 @@ async def _run_shot_generation(project_id: str):
 
     try:
         for i, shot in enumerate(all_shots):
-            # 跳过已生成的
-            if image_paths[i] is not None:
+            # 已存在且文件真实存在才跳过；JSON 有路径但文件缺失则重新生成
+            existing_path = image_paths[i]
+            if existing_path and Path(existing_path).exists():
                 add_log("INFO", "shot", f"镜头 {i} 已有画面，跳过", project_id)
                 continue
+            image_paths[i] = None
             try:
                 output_path = OUTPUT_DIR / project_id / "shots" / f"shot_{i:04d}.png"
                 result = await generate_shot_image_single(shot, output_path, project.characters)
