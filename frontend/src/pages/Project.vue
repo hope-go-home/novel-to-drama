@@ -230,15 +230,25 @@
         </div>
       </section>
 
-      <!-- 最终视频 -->
-      <section v-if="finalVideoUrl" class="section">
+      <!-- 最终视频（时间戳版本化，保留历史） -->
+      <section v-if="finalVideoUrl || outputFiles.length" class="section">
         <div class="section-header">
           <h2 class="section-title">最终视频</h2>
-          <button class="btn btn-danger btn-xs" @click="handleDeleteOutput">删除</button>
+          <button v-if="finalVideoUrl" class="btn btn-danger btn-xs" @click="handleDeleteOutput">删除全部</button>
         </div>
         <div v-if="finalVideoUrl" class="video-area">
           <video controls :src="finalVideoUrl" />
           <a :href="finalVideoUrl" download class="btn btn-outline mt-2">下载视频</a>
+        </div>
+        <div v-if="outputFiles.length > 1" class="output-history">
+          <div class="output-history-hd">历史成片（{{ outputFiles.length }}）</div>
+          <div v-for="f in outputFiles" :key="f.name" class="output-item">
+            <span class="output-name">{{ f.name }}</span>
+            <span class="output-time">{{ fmtTime(f.mtime) }}</span>
+            <a :href="img(f.path)" target="_blank" class="btn btn-ghost btn-xs">播放</a>
+            <a :href="img(f.path)" download class="btn btn-ghost btn-xs">下载</a>
+            <button class="btn btn-danger btn-xs" @click="handleDeleteOutputFile(f.name)">删除</button>
+          </div>
         </div>
       </section>
     </div>
@@ -359,7 +369,8 @@ import {
   generateAudio, generateVideos, composeVideo,
   deleteScript, deleteCharacters, deleteShots, deleteAudio,
   deleteVideos, deleteOutput, deleteSingleShot, deleteSingleVideo,
-  updateProjectSettings, redoSingleShot, aiChatScript, applyScript
+  updateProjectSettings, redoSingleShot, aiChatScript, applyScript,
+  getOutputs, deleteOutputFile
 } from '../api'
 import { getLogs, clearLogs } from '../api'
 import LogPanel from '../components/LogPanel.vue'
@@ -434,6 +445,7 @@ const loadProject = async () => {
     shotImages.value = data.shot_images || []
     audioPaths.value = data.audio_paths || []
     videoPaths.value = data.video_paths || []
+    await loadOutputs()
   } catch (e) { console.error(e) }
 }
 
@@ -447,7 +459,33 @@ const loadFinalVideo = async () => {
     finalVideoUrl.value = base.includes('?') ? base : `${base}?v=${Date.now()}`
     return true
   } catch (e) {
+    finalVideoUrl.value = ''
     return false
+  }
+}
+
+// 历史成片（时间戳版本）
+const outputFiles = ref([])
+const loadOutputs = async () => {
+  try {
+    const { data } = await getOutputs(route.params.id)
+    outputFiles.value = data.files || []
+  } catch (e) { outputFiles.value = [] }
+}
+const fmtTime = (ts) => {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+const handleDeleteOutputFile = async (name) => {
+  if (!confirm(`删除成片 ${name}？`)) return
+  try {
+    await deleteOutputFile(route.params.id, name)
+    await loadOutputs()
+    await loadFinalVideo()
+  } catch (e) {
+    alert('删除失败: ' + (e.response?.data?.detail || e.message))
   }
 }
 
@@ -1343,6 +1381,37 @@ onUnmounted(() => {
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
 }
+
+/* 历史成片 */
+.output-history {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.output-history-hd {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.output-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12px;
+}
+.output-item:last-child { border-bottom: none; }
+.output-name {
+  font-family: var(--font-mono, monospace);
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.output-time { color: var(--text-light); flex-shrink: 0; }
 
 /* 图片放大弹窗 */
 .lightbox {

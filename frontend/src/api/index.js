@@ -18,6 +18,8 @@ export const getProject = (id) => api.get(`/projects/${id}`)
 export const deleteProject = (id) => api.delete(`/projects/${id}`)
 export const getResult = (id) => api.get(`/projects/${id}/result`)
 export const updateProjectSettings = (id, data) => api.post(`/projects/${id}/settings`, data)
+export const getOutputs = (id) => api.get(`/projects/${id}/outputs`)
+export const deleteOutputFile = (id, filename) => api.delete(`/projects/${id}/output/${encodeURIComponent(filename)}`)
 
 // 日志
 export const getLogs = (limit = 100, projectId = '') => api.get('/logs', { params: { limit, project_id: projectId } })

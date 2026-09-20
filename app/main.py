@@ -427,14 +427,56 @@ async def delete_videos(project_id: str):
 
 @app.delete("/api/projects/{project_id}/output")
 async def delete_output(project_id: str):
-    """删除最终合成视频"""
+    """删除全部最终合成视频"""
     _load_project(project_id)
     output_dir = OUTPUT_DIR / project_id / "output"
     if output_dir.exists():
         shutil.rmtree(output_dir)
         output_dir.mkdir()
-    add_log("WARN", "compose", "删除最终合成视频", project_id)
+    add_log("WARN", "compose", "删除全部最终合成视频", project_id)
     return {"message": "最终视频已删除"}
+
+
+@app.get("/api/projects/{project_id}/outputs")
+async def list_outputs(project_id: str):
+    """列出历史成片（时间戳版本），按时间倒序"""
+    _load_project(project_id)
+    out_dir = OUTPUT_DIR / project_id / "output"
+    files = []
+    if out_dir.exists():
+        for f in out_dir.glob("final_video*.mp4"):
+            st = f.stat()
+            files.append({"name": f.name, "path": str(f), "mtime": st.st_mtime, "size": st.st_size})
+    files.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"files": files}
+
+
+@app.delete("/api/projects/{project_id}/output/{filename}")
+async def delete_output_file(project_id: str, filename: str):
+    """删除指定成片文件；若删的是当前结果，则回退到剩余最新成片"""
+    _load_project(project_id)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="非法文件名")
+    out_dir = OUTPUT_DIR / project_id / "output"
+    target = out_dir / filename
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    target.unlink()
+
+    # 更新 result.txt：若指向被删文件则回退到剩余最新，否则清理
+    result_path = out_dir / "result.txt"
+    if result_path.exists():
+        cur = result_path.read_text(encoding="utf-8").strip()
+        if Path(cur).name == filename:
+            remaining = sorted(
+                [f for f in out_dir.glob("final_video*.mp4")],
+                key=lambda x: x.stat().st_mtime, reverse=True,
+            )
+            if remaining:
+                result_path.write_text(str(remaining[0]), encoding="utf-8")
+            else:
+                result_path.unlink(missing_ok=True)
+    return {"message": "已删除"}
 
 
 @app.delete("/api/projects/{project_id}/shot/{index}")

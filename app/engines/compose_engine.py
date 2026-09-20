@@ -1,5 +1,6 @@
 """视频合成引擎 - 画面/视频片段 + 音频 + 字幕 → 最终视频"""
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from ..models import Shot
 
@@ -304,7 +305,9 @@ async def compose_final_video(
             # 用文件名（因为 concat_list 和 temp_clips 在同一目录）
             f.write(f"file '{clip.name}'\n")
 
-    final_output = output_dir / "final_video.mp4"
+    # 时间戳版本化输出，不覆盖历史成片
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    final_output = output_dir / f"final_video_{stamp}.mp4"
     concat_cmd = [
         FFMPEG_PATH, "-y",
         "-f", "concat",
