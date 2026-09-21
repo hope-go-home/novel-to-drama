@@ -88,6 +88,24 @@ def _get_all_shots(project: Project):
     return shots
 
 
+def _get_scene_indices(project: Project) -> list:
+    """每个镜头所属场景下标（用于转场判定）"""
+    idx = []
+    if project.script:
+        for si, scene in enumerate(project.script.scenes):
+            for _ in scene.shots:
+                idx.append(si)
+    return idx
+
+
+def _load_audio_tracks(project_id: str) -> dict:
+    """读取音频增强轨登记（校验文件存在）"""
+    reg = _load_json(project_id, "audio_tracks.json")
+    if not reg:
+        return {}
+    return reg
+
+
 def _is_cancelled(project_id: str) -> bool:
     """检查项目是否被取消（保留兼容性）"""
     return project_id not in _running_tasks
@@ -168,7 +186,7 @@ async def _budget_confirm_payload(project_id: str, step: str, unit: float) -> di
 @app.post("/api/projects")
 async def create_project(req: ProjectCreate):
     project_id = str(uuid.uuid4())[:8]
-    project = Project(id=project_id, name=req.name, novel_text=req.novel_text, use_tts=req.use_tts)
+    project = Project(id=project_id, name=req.name, novel_text=req.novel_text, use_tts=req.use_tts, image_style=req.image_style)
     ensure_project_dir(project_id)
     _save_project(project)
     add_log("SUCCESS", "system", f"创建项目「{req.name}」({project_id})", project_id)
@@ -255,6 +273,16 @@ async def get_project(project_id: str):
     video_paths = _load_json(project_id, "video_paths.json") or []
     d["video_paths"] = [p if p and Path(p).exists() else None for p in video_paths]
 
+    # 音频增强轨（音效/环境音/BGM）
+    tracks = _load_json(project_id, "audio_tracks.json") or {}
+    def _valid_list(lst):
+        return [p if p and Path(p).exists() else None for p in (lst or [])]
+    tracks["sfx"] = _valid_list(tracks.get("sfx"))
+    tracks["ambience"] = _valid_list(tracks.get("ambience"))
+    if tracks.get("bgm") and not Path(tracks["bgm"]).exists():
+        tracks["bgm"] = None
+    d["audio_tracks"] = tracks
+
     # 成本统计（当日已花费）
     try:
         from .engines.cost_engine import get_project_spend
@@ -269,14 +297,36 @@ async def get_project(project_id: str):
 
 @app.post("/api/projects/{project_id}/settings")
 async def update_project_settings(project_id: str, body: dict):
-    """更新项目设置（当前仅 use_tts）"""
+    """更新项目设置（use_tts / image_style）"""
     project = _load_project(project_id)
     if "use_tts" in body:
         project.use_tts = bool(body["use_tts"])
+        mode = "TTS 配音" if project.use_tts else "AI 原声"
+        add_log("INFO", "system", f"声音方案切换为「{mode}」", project_id)
+    if "image_style" in body:
+        project.image_style = str(body["image_style"] or "")
+        add_log("INFO", "system", f"画面风格切换为「{project.image_style or '全局默认'}」", project_id)
+    if "narration_mode" in body:
+        mode = str(body["narration_mode"] or "smart")
+        if mode not in ("full", "smart", "off"):
+            mode = "smart"
+        project.narration_mode = mode
+        label = {"full": "全程旁白", "smart": "智能旁白", "off": "无旁白"}[mode]
+        add_log("INFO", "system", f"旁白模式切换为「{label}」(需重新生成剧本生效)", project_id)
     _save_project(project)
-    mode = "TTS 配音" if project.use_tts else "AI 原声"
-    add_log("INFO", "system", f"声音方案切换为「{mode}」", project_id)
-    return {"use_tts": project.use_tts, "message": "设置已更新"}
+    return {
+        "use_tts": project.use_tts,
+        "image_style": project.image_style,
+        "narration_mode": project.narration_mode,
+        "message": "设置已更新",
+    }
+
+
+@app.get("/api/styles")
+async def list_styles_api():
+    """列出所有可用画面风格"""
+    from .config import list_styles
+    return {"styles": list_styles()}
 
 
 @app.delete("/api/projects/{project_id}")
@@ -577,7 +627,7 @@ async def _run_character_generation(project_id: str):
     _save_project(project)
     add_log("INFO", "character", "开始生成角色三视图", project_id)
     try:
-        project.characters = await generate_all_characters(project.script.characters, OUTPUT_DIR / project_id)
+        project.characters = await generate_all_characters(project.script.characters, OUTPUT_DIR / project_id, project.image_style)
         project.status = ProjectStatus.CHARACTERS_DONE
         _save_project(project)
         add_log("SUCCESS", "character", f"角色生成完成: {len(project.characters)} 个角色", project_id)
@@ -636,7 +686,7 @@ async def _run_shot_generation(project_id: str):
             image_paths[i] = None
             try:
                 output_path = OUTPUT_DIR / project_id / "shots" / f"shot_{i:04d}.png"
-                result = await generate_shot_image_single(shot, output_path, project.characters)
+                result = await generate_shot_image_single(shot, output_path, project.characters, project.image_style)
                 image_paths[i] = result
                 _save_json(project_id, "shot_images.json", image_paths)  # 每生成一个就保存
                 add_log("SUCCESS", "shot", f"镜头 {i} 画面完成", project_id)
@@ -818,7 +868,50 @@ async def generate_videos_api(project_id: str, force: bool = False):
     return {"message": "AI 视频生成已启动"}
 
 
-async def _run_compose(project_id: str):
+async def _run_audiofx_generation(project_id: str):
+    from .engines.audio_fx_engine import generate_audio_tracks
+    project = _load_project(project_id)
+    if not project.script:
+        project.status = ProjectStatus.ERROR
+        project.error_message = "请先生成剧本"
+        _save_project(project)
+        return
+    try:
+        audio_paths = _load_json(project_id, "audio_paths.json") or []
+        video_paths = _load_json(project_id, "video_paths.json") or []
+        generate_audio_tracks(project, OUTPUT_DIR / project_id, audio_paths, video_paths)
+    except asyncio.CancelledError:
+        add_log("WARN", "audiofx", "生成已停止", project_id)
+        raise
+    except Exception as e:
+        add_log("ERROR", "audiofx", f"音频轨生成失败: {str(e)}", project_id, str(e))
+
+
+@app.post("/api/projects/{project_id}/generate-audiofx")
+async def generate_audiofx_api(project_id: str):
+    _load_project(project_id)
+    await _launch_task(project_id, "audiofx", _run_audiofx_generation(project_id))
+    return {"message": "音效/环境音/BGM 生成已启动"}
+
+
+@app.delete("/api/projects/{project_id}/audiofx")
+async def delete_audiofx(project_id: str):
+    _load_project(project_id)
+    import shutil
+    base = OUTPUT_DIR / project_id
+    for sub in ("sfx", "ambience", "bgm"):
+        p = base / sub
+        if p.exists():
+            shutil.rmtree(p)
+            p.mkdir()
+    fp = base / "audio_tracks.json"
+    if fp.exists():
+        fp.unlink()
+    add_log("WARN", "audiofx", "删除音效/环境音/BGM", project_id)
+    return {"message": "已删除"}
+
+
+async def _run_compose(project_id: str, with_sfx: bool = True, with_ambience: bool = True, with_bgm: bool = True):
     from .engines.compose_engine import compose_final_video
     project = _load_project(project_id)
     if not project.script:
@@ -839,6 +932,9 @@ async def _run_compose(project_id: str):
             shots=all_shots, shot_image_paths=image_paths,
             video_clip_paths=video_paths, audio_paths=audio_paths,
             project_dir=OUTPUT_DIR / project_id, use_tts=project.use_tts,
+            scene_indices=_get_scene_indices(project),
+            audio_tracks=_load_audio_tracks(project_id),
+            with_sfx=with_sfx, with_ambience=with_ambience, with_bgm=with_bgm,
         )
         project.status = ProjectStatus.DONE
         _save_project(project)
@@ -858,9 +954,16 @@ async def _run_compose(project_id: str):
 
 
 @app.post("/api/projects/{project_id}/compose")
-async def compose_api(project_id: str):
+async def compose_api(project_id: str, body: dict = None):
     _load_project(project_id)
-    await _launch_task(project_id, "compose", _run_compose(project_id))
+    body = body or {}
+    with_sfx = bool(body.get("with_sfx", True))
+    with_ambience = bool(body.get("with_ambience", True))
+    with_bgm = bool(body.get("with_bgm", True))
+    await _launch_task(
+        project_id, "compose",
+        _run_compose(project_id, with_sfx=with_sfx, with_ambience=with_ambience, with_bgm=with_bgm),
+    )
     return {"message": "视频合成已启动"}
 
 
@@ -892,7 +995,7 @@ async def _run_full_pipeline(project_id: str):
             if _is_cancelled(project_id): return
             project.status = ProjectStatus.CHARACTERS_GENERATING
             _save_project(project)
-            project.characters = await generate_all_characters(project.script.characters, project_dir)
+            project.characters = await generate_all_characters(project.script.characters, project_dir, project.image_style)
             project.status = ProjectStatus.CHARACTERS_DONE
             _save_project(project)
 
@@ -917,7 +1020,7 @@ async def _run_full_pipeline(project_id: str):
             project.status = ProjectStatus.SHOTS_GENERATING
             _save_project(project)
             all_shots = _get_all_shots(project)
-            image_paths = await generate_shot_images(all_shots, project_dir, project.characters)
+            image_paths = await generate_shot_images(all_shots, project_dir, project.characters, project.image_style)
             _save_json(project_id, "shot_images.json", image_paths)
             project.status = ProjectStatus.SHOTS_DONE
             _save_project(project)
@@ -1005,7 +1108,18 @@ async def _run_full_pipeline(project_id: str):
         else:
             video_paths = existing_video
 
-        # Step 6: 合成
+        # Step 6: 音效/环境音/BGM（TTS 模式才做；已有则跳过）
+        audio_tracks = _load_audio_tracks(project_id)
+        if project.use_tts and not audio_tracks.get("bgm") and not any(audio_tracks.get("sfx") or []):
+            if _is_cancelled(project_id): return
+            try:
+                from .engines.audio_fx_engine import generate_audio_tracks
+                audio_tracks = generate_audio_tracks(project, project_dir, audio_paths, video_paths)
+            except Exception as e:
+                print(f"音频轨生成失败，跳过: {e}")
+                audio_tracks = {}
+
+        # Step 7: 合成
         project.status = ProjectStatus.COMPOSING
         _save_project(project)
         all_shots = _get_all_shots(project)
@@ -1013,6 +1127,8 @@ async def _run_full_pipeline(project_id: str):
             shots=all_shots, shot_image_paths=image_paths,
             video_clip_paths=video_paths, audio_paths=audio_paths,
             project_dir=project_dir, use_tts=project.use_tts,
+            scene_indices=_get_scene_indices(project),
+            audio_tracks=audio_tracks,
         )
         project.status = ProjectStatus.DONE
         _save_project(project)
@@ -1131,17 +1247,18 @@ async def _run_single_shot_redo(project_id: str, index: int):
     _save_project(project)
     add_log("INFO", "redo", f"单镜头重做开始: 镜头 {index}", project_id)
     try:
-        # 1) 清除该镜头缓存（图 / 音频 / 视频）
+        # 1) 清除该镜头缓存（图 / 音频 / 视频 / 音效轨）
         shot_png = project_dir / "shots" / f"shot_{index:04d}.png"
         shot_png.unlink(missing_ok=True)
         clip_mp4 = project_dir / "video_clips" / f"clip_{index:04d}.mp4"
         clip_mp4.unlink(missing_ok=True)
+        (project_dir / "sfx" / f"shot_{index:04d}.mp3").unlink(missing_ok=True)
         audio_dir = project_dir / "audio"
         for f in audio_dir.glob(f"shot_{index:04d}_*.mp3"):
             f.unlink(missing_ok=True)
         # 2) 重生成分镜画面
         from .engines.shot_engine import generate_shot_image_single
-        image_path = await generate_shot_image_single(shot, shot_png, project.characters)
+        image_path = await generate_shot_image_single(shot, shot_png, project.characters, project.image_style)
         images = _load_json(project_id, "shot_images.json") or []
         if index < len(images):
             images[index] = image_path
@@ -1168,6 +1285,8 @@ async def _run_single_shot_redo(project_id: str, index: int):
             video_clip_paths=video_paths,
             audio_paths=_load_json(project_id, "audio_paths.json") or [],
             project_dir=project_dir, use_tts=project.use_tts,
+            scene_indices=_get_scene_indices(project),
+            audio_tracks=_load_audio_tracks(project_id),
         )
         project.status = ProjectStatus.DONE
         project.error_message = ""

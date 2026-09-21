@@ -4,7 +4,7 @@
 import httpx
 import base64
 from pathlib import Path
-from ..config import ARK_API_KEY, ARK_BASE_URL, IMAGE_MODEL, IMAGE_SIZE, get_style_prefix
+from ..config import ARK_API_KEY, ARK_BASE_URL, IMAGE_MODEL, IMAGE_SIZE, get_style_prompt
 from ..models import CharacterInfo, CharacterViews
 
 
@@ -63,6 +63,7 @@ async def _generate_image(prompt: str, output_path: Path) -> str:
 async def generate_character_views(
     character: CharacterInfo,
     project_dir: Path,
+    style_key: str = None,
 ) -> CharacterViews:
     """为一个角色生成三视图"""
     char_dir = project_dir / "characters" / character.name
@@ -81,7 +82,7 @@ async def generate_character_views(
             back_image=str(back_path),
         )
 
-    style = get_style_prefix()
+    style = get_style_prompt(style_key)
     views = CharacterViews(
         character_name=character.name,
         description=character.description,
@@ -106,10 +107,11 @@ async def generate_character_views(
 async def generate_all_characters(
     characters: list[CharacterInfo],
     project_dir: Path,
+    style_key: str = None,
 ) -> list[CharacterViews]:
     """为所有角色生成三视图"""
     results = []
     for char in characters:
-        views = await generate_character_views(char, project_dir)
+        views = await generate_character_views(char, project_dir, style_key)
         results.append(views)
     return results

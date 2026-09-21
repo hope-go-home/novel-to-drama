@@ -26,6 +26,8 @@ def _resolve_path(media_path: str, base_dir: str = None) -> Path:
 
 def probe_duration(media_path: str, base_dir: str = None) -> float:
     """获取音视频文件时长（秒）；失败/缺失返回 0.0"""
+    if not media_path:
+        return 0.0
     p = _resolve_path(media_path, base_dir)
     if not p.exists():
         return 0.0
@@ -46,6 +48,8 @@ def probe_duration(media_path: str, base_dir: str = None) -> float:
 
 def probe_has_audio(media_path: str, base_dir: str = None) -> bool:
     """判断媒体文件是否带音轨"""
+    if not media_path:
+        return False
     p = _resolve_path(media_path, base_dir)
     if not p.exists():
         return False

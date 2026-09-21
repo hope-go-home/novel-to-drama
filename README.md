@@ -19,6 +19,10 @@
 - **资产管理**：前端可预览并单独删除任意资产（剧本/角色/分镜/音频/视频片段/成片）
 - **实时进度**：SSE 推送日志与状态，前端步骤进度条实时刷新
 - **成本预算**：内置用量记账与预算阈值提醒（Redis 可选，不可用自动降级）
+- **音效 / 环境音 / BGM（本地素材库）**：大模型按剧本判断音效名/场景氛围/BGM 情绪，代码匹配本地素材并自动嵌入（音效对帧、环境音循环、BGM 铺底）；匹配不到自动跳过
+- **转场 / 卡点**：镜头间淡入淡出（场景边界更明显），切镜点可放转场音效
+- **旁白智能分配**：全程/智能/无三档；智能模式只在无对白镜头才加旁白
+- **合成可选轨**：合成时可勾选是否混入 音效/环境音/BGM，不满意可关掉重新合成（成片时间戳版本化，不覆盖）
 
 ## 🧱 技术栈
 
@@ -48,7 +52,9 @@
    ↓
 🎤 Doubao TTS → 多角色配音（对白 + 旁白，按顺序）
    ↓
-🎞️ FFmpeg → 最终合成（字幕 + 配音 / 原声）
+🔊 本地素材库 → 音效 / 环境音 / BGM（按剧本情绪与音效名匹配，自动嵌入）
+   ↓
+🎞️ FFmpeg → 最终合成（字幕 + 四轨混音 + 转场 + 响度归一化）
 ```
 
 > 声音方案在**创建项目**时选择，也可在项目详情页随时切换（切换后需重跑相关步骤生效）。
@@ -99,7 +105,23 @@ REDIS_URL=redis://:123456@localhost:6381/0
 OUTPUT_DIR=./projects
 IMAGE_STYLE=anime
 VIDEO_DURATION=5
+
+# 本地音频素材（音效/环境音/BGM）
+SFX_ENABLED=true
+AMBIENCE_ENABLED=true
+BGM_ENABLED=true
+SFX_VOLUME=0.8
+AMBIENCE_VOLUME=0.4
+BGM_VOLUME=0.12
+BGM_DUCK=true
+DUCK_SFX_AMB=true
+BGM_CROSSFADE=0.4
+KEEP_VIDEO_AUDIO=false
+SFX_MOTION_ALIGN=true
+SFX_ALIGN_WINDOW=0.6
 ```
+
+> 音频素材放在 `assets/sfx`、`assets/ambience`、`assets/bgm`，映射表在 `assets/audio_map.json`（素材音频不入 git，映射表入库）。
 
 ### 3. 启动服务
 
@@ -154,9 +176,11 @@ npm run dev
 | `/api/projects/{id}/generate-shots` | POST | 生成分镜画面 |
 | `/api/projects/{id}/generate-audio` | POST | 生成语音 |
 | `/api/projects/{id}/generate-videos` | POST | 生成 AI 视频 |
-| `/api/projects/{id}/compose` | POST | 合成最终视频 |
+| `/api/projects/{id}/generate-audiofx` | POST | 生成音效/环境音/BGM 轨 |
+| `/api/projects/{id}/compose` | POST | 合成最终视频（body 可选 `with_bgm/with_sfx/with_ambience`） |
 | `/api/projects/{id}/shot/{index}/redo` | POST | 单镜重做 |
 | `/api/projects/{id}/result` | GET | 获取最终视频路径 |
+| `/api/projects/{id}/outputs` | GET | 历史成片列表 |
 | `/api/projects/{id}/task` | GET | 当前任务状态 |
 | `/api/projects/{id}/budget` | GET | 成本预算/用量 |
 | `/api/projects/{id}/events` | GET | SSE 实时日志/进度 |
@@ -197,8 +221,9 @@ novel-to-drama/
 │   │   ├── character_engine.py   # 角色三视图（Seedream，含缓存）
 │   │   ├── shot_engine.py        # 分镜画面（Seedream 图生图，16:9）
 │   │   ├── audio_engine.py       # 语音合成（Doubao TTS，多段对话合并）
+│   │   ├── audio_fx_engine.py    # 音效/环境音/BGM（本地素材库匹配 + ffmpeg 嵌入）
 │   │   ├── video_engine.py       # AI 视频（万相 Wan，时长自适应）
-│   │   ├── compose_engine.py     # 最终合成（FFmpeg，字幕 + 音轨）
+│   │   ├── compose_engine.py     # 最终合成（FFmpeg，字幕 + 四轨混音 + 转场 + 响度）
 │   │   └── cost_engine.py        # 成本记账/预算
 │   └── utils/
 │       ├── prompts.py            # LLM Prompt 模板
@@ -222,6 +247,11 @@ novel-to-drama/
 │   │   ├── App.vue / main.js / style.css
 │   ├── vite.config.js
 │   └── package.json
+├── assets/                       # 本地音频素材库（音频不入 git）
+│   ├── sfx/                      # 音效（拔剑/脚步/开门…）
+│   ├── ambience/                 # 环境音（雨/风/夜/街道/室内…）
+│   ├── bgm/                      # 背景音乐（按情绪）
+│   └── audio_map.json            # 名称/场景/情绪 → 素材 映射表
 ├── projects/                     # 项目数据（自动生成，不提交 git）
 │   └── {project_id}/
 │       ├── project.json          # 元数据 + 剧本
@@ -229,8 +259,12 @@ novel-to-drama/
 │       ├── characters/           # 角色三视图
 │       ├── shots/                # 分镜画面
 │       ├── audio/                # 语音文件
+│       ├── sfx/                  # 每镜头音效轨
+│       ├── ambience/             # 每镜头环境音轨
+│       ├── bgm/                  # 整片 BGM
+│       ├── audio_tracks.json     # 音效/环境音/BGM 登记
 │       ├── video_clips/          # AI 视频片段
-│       └── output/               # 最终合成视频
+│       └── output/               # 最终合成视频（时间戳版本化）
 ├── requirements.txt
 ├── .env.example
 └── README.md

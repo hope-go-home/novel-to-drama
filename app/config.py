@@ -27,6 +27,26 @@ VOLC_TTS_APP_ID = os.getenv("VOLC_TTS_APP_ID", "")
 VOLC_TTS_ACCESS_TOKEN = os.getenv("VOLC_TTS_ACCESS_TOKEN", "")
 VOLC_TTS_RESOURCE_ID = os.getenv("VOLC_TTS_RESOURCE_ID", "seed-tts-2.0")
 
+# 本地音频素材库（音效/环境音/BGM）
+ASSETS_DIR = Path(os.getenv("ASSETS_DIR", BASE_DIR / "assets"))
+SFX_ENABLED = os.getenv("SFX_ENABLED", "true").lower() == "true"
+AMBIENCE_ENABLED = os.getenv("AMBIENCE_ENABLED", "true").lower() == "true"
+BGM_ENABLED = os.getenv("BGM_ENABLED", "true").lower() == "true"
+SFX_VOLUME = float(os.getenv("SFX_VOLUME", "0.8"))
+AMBIENCE_VOLUME = float(os.getenv("AMBIENCE_VOLUME", "0.4"))
+BGM_VOLUME = float(os.getenv("BGM_VOLUME", "0.12"))
+BGM_DUCK = os.getenv("BGM_DUCK", "true").lower() == "true"
+# 人声出现时对音效/环境音也做动态闪避（sidechain）
+DUCK_SFX_AMB = os.getenv("DUCK_SFX_AMB", "true").lower() == "true"
+# BGM 场景之间的交叉淡化时长（秒）
+BGM_CROSSFADE = float(os.getenv("BGM_CROSSFADE", "0.4"))
+# 合成时是否保留 AI 视频自带的音轨（默认 false：丢弃 i2v 自动生成的 BGM/音效，声音全部由本地素材库提供）
+KEEP_VIDEO_AUDIO = os.getenv("KEEP_VIDEO_AUDIO", "false").lower() == "true"
+# 是否用画面运动峰值校正音效时刻（把音效吸附到画面"真的在动"的那一下）
+SFX_MOTION_ALIGN = os.getenv("SFX_MOTION_ALIGN", "true").lower() == "true"
+# 音效吸附窗口（秒）：只在窗口内找到显著运动峰时才吸附
+SFX_ALIGN_WINDOW = float(os.getenv("SFX_ALIGN_WINDOW", "0.6"))
+
 # Redis（独立容器 ntd-redis，宿主端口 6381，与 rag/aw 实例隔离）
 REDIS_URL = os.getenv("REDIS_URL", "redis://:123456@localhost:6381/0")
 
@@ -53,13 +73,28 @@ VIDEO_DURATION = int(os.getenv("VIDEO_DURATION", "5"))
 
 STYLE_PROMPTS = {
     "anime": "anime style, high quality, detailed, vibrant colors, manga illustration",
-    "realistic": "photorealistic, cinematic lighting, detailed, 8k resolution",
+    "cinematic": "cinematic film still, dramatic volumetric lighting, shallow depth of field, epic composition, movie quality, film grain",
+    "realistic": "photorealistic, cinematic lighting, film grain, shallow depth of field, 8k, ultra detailed",
     "ink": "chinese ink painting style, watercolor, traditional art, elegant",
-    "cyberpunk": "cyberpunk style, neon lights, futuristic, dark atmosphere",
+    "guofeng": "chinese guofeng illustration, elegant oriental aesthetics, detailed hanfu, ink wash accents, cinematic, high quality",
+    "cyberpunk": "cyberpunk style, neon lights, futuristic, dark atmosphere, blade runner vibes, volumetric fog",
+    "3d": "3d render, pixar style, octane render, subsurface scattering, cinematic lighting, highly detailed",
+    "korean": "korean webtoon style, clean lineart, soft shading, beautiful character design, high quality",
+    "watercolor": "watercolor illustration, soft colors, painterly, delicate, artistic",
+    "comic": "american comic style, bold ink lines, dynamic posing, dramatic shading, high contrast",
 }
 
+def get_style_prompt(style_key: str = None) -> str:
+    """按风格 key 取风格提示词；未指定则用全局 IMAGE_STYLE"""
+    key = style_key or IMAGE_STYLE or "anime"
+    return STYLE_PROMPTS.get(key, STYLE_PROMPTS["anime"])
+
 def get_style_prefix() -> str:
-    return STYLE_PROMPTS.get(IMAGE_STYLE, STYLE_PROMPTS["anime"])
+    return get_style_prompt(IMAGE_STYLE)
+
+def list_styles() -> list:
+    """列出所有可用风格（供前端选择）"""
+    return [{"key": k, "prompt": v} for k, v in STYLE_PROMPTS.items()]
 
 def ensure_project_dir(project_id: str) -> Path:
     project_dir = OUTPUT_DIR / project_id

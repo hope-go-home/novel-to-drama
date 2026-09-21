@@ -7,6 +7,27 @@
         <p class="text-xs text-dim" style="margin-top:2px">{{ $route.params.id }}</p>
       </div>
       <div class="header-actions">
+        <select
+          class="style-select"
+          :value="project.image_style || ''"
+          :disabled="running"
+          title="画面风格（改动后需重跑「角色/分镜」生效）"
+          @change="handleStyleChange($event.target.value)"
+        >
+          <option value="">全局默认风格</option>
+          <option v-for="s in styles" :key="s.key" :value="s.key">{{ styleLabel(s.key) }}</option>
+        </select>
+        <select
+          class="style-select"
+          :value="project.narration_mode || 'smart'"
+          :disabled="running"
+          title="旁白模式（改动后需重新生成剧本生效）"
+          @change="handleNarrationChange($event.target.value)"
+        >
+          <option value="full">全程旁白</option>
+          <option value="smart">智能旁白</option>
+          <option value="off">无旁白</option>
+        </select>
         <div class="tts-seg" title="声音方案：配音=角色TTS对白+旁白并丢视频原声；原声=保留AI视频自带声音拼接">
           <button class="btn btn-xs" :class="project.use_tts !== false ? 'btn-primary' : 'btn-ghost'" :disabled="running" @click="handleToggleTts(true)">TTS 配音</button>
           <button class="btn btn-xs" :class="project.use_tts === false ? 'btn-primary' : 'btn-ghost'" :disabled="running" @click="handleToggleTts(false)">AI 原声</button>
@@ -230,11 +251,37 @@
         </div>
       </section>
 
+      <!-- 音频增强（音效/环境音/BGM，仅 TTS 模式） -->
+      <section v-if="project.use_tts !== false" class="section">
+        <div class="section-header">
+          <h2 class="section-title">音效 / 环境音 / BGM</h2>
+          <div class="header-actions">
+            <button class="btn btn-outline btn-xs" :disabled="running" @click="handleGenerateAudiofx">生成/重跑</button>
+            <button class="btn btn-danger btn-xs" @click="handleDeleteAudiofx">全部删除</button>
+          </div>
+        </div>
+        <div class="audio-track-info">
+          <span>音效轨：{{ (audioTracks.sfx || []).filter(Boolean).length }} 条</span>
+          <span>环境音轨：{{ (audioTracks.ambience || []).filter(Boolean).length }} 条</span>
+          <span>BGM：{{ audioTracks.bgm ? '已生成' : '无' }}</span>
+        </div>
+        <div v-if="audioTracks.bgm" class="audio-item" style="margin-top:10px">
+          <span class="audio-label">BGM</span>
+          <audio controls :src="img(audioTracks.bgm)" />
+        </div>
+      </section>
+
       <!-- 最终视频（时间戳版本化，保留历史） -->
       <section v-if="finalVideoUrl || outputFiles.length" class="section">
         <div class="section-header">
           <h2 class="section-title">最终视频</h2>
-          <button v-if="finalVideoUrl" class="btn btn-danger btn-xs" @click="handleDeleteOutput">删除全部</button>
+          <div class="header-actions">
+            <label class="chk"><input type="checkbox" v-model="composeOpts.bgm" :disabled="running" /> BGM</label>
+            <label class="chk"><input type="checkbox" v-model="composeOpts.sfx" :disabled="running" /> 音效</label>
+            <label class="chk"><input type="checkbox" v-model="composeOpts.ambience" :disabled="running" /> 环境音</label>
+            <button class="btn btn-primary btn-xs" :disabled="running" @click="handleComposeWithOpts">重新合成</button>
+            <button v-if="finalVideoUrl" class="btn btn-danger btn-xs" @click="handleDeleteOutput">删除全部</button>
+          </div>
         </div>
         <div v-if="finalVideoUrl" class="video-area">
           <video controls :src="finalVideoUrl" />
@@ -370,7 +417,7 @@ import {
   deleteScript, deleteCharacters, deleteShots, deleteAudio,
   deleteVideos, deleteOutput, deleteSingleShot, deleteSingleVideo,
   updateProjectSettings, redoSingleShot, aiChatScript, applyScript,
-  getOutputs, deleteOutputFile
+  getOutputs, deleteOutputFile, getStyles, generateAudiofx, deleteAudiofx
 } from '../api'
 import { getLogs, clearLogs } from '../api'
 import LogPanel from '../components/LogPanel.vue'
@@ -382,9 +429,17 @@ const finalVideoUrl = ref('')
 const shotImages = ref([])
 const audioPaths = ref([])
 const videoPaths = ref([])
+const audioTracks = ref({})
 const expandedScenes = reactive({})
 const lightbox = ref(null)
 const logs = ref([])
+const styles = ref([])
+const STYLE_LABELS = {
+  anime: '日系动漫', cinematic: '电影感', realistic: '写实电影', ink: '国风水墨',
+  guofeng: '国风插画', cyberpunk: '赛博朋克', '3d': '3D/皮克斯', korean: '韩漫',
+  watercolor: '水彩', comic: '美漫',
+}
+const styleLabel = (k) => STYLE_LABELS[k] || k
 let pollTimer = null
 let logTimer = null
 let sseSource = null
@@ -445,6 +500,7 @@ const loadProject = async () => {
     shotImages.value = data.shot_images || []
     audioPaths.value = data.audio_paths || []
     videoPaths.value = data.video_paths || []
+    audioTracks.value = data.audio_tracks || {}
     await loadOutputs()
   } catch (e) { console.error(e) }
 }
@@ -681,13 +737,20 @@ const connectSse = () => {
   sseSource = es
 }
 
+// 合成时是否混入 音效/环境音/BGM（可在页面勾选；不满意可关掉重新合成）
+const composeOpts = reactive({ sfx: true, ambience: true, bgm: true })
+
 const stepApi = {
   script: generateScript,
   characters: generateCharacters,
   shots: generateShots,
   audio: generateAudio,
   video: generateVideos,
-  compose: composeVideo,
+  compose: (id, force) => composeVideo(id, force, {
+    with_sfx: composeOpts.sfx,
+    with_ambience: composeOpts.ambience,
+    with_bgm: composeOpts.bgm,
+  }),
 }
 
 // 预算确认：若接口返回 budget_confirm（今日花费将超限额），弹窗询问是否继续。
@@ -838,6 +901,79 @@ const handleToggleTts = async (val) => {
   }
 }
 
+const loadStyles = async () => {
+  try {
+    const { data } = await getStyles()
+    styles.value = data.styles || []
+  } catch (e) { styles.value = [] }
+}
+
+const handleStyleChange = async (val) => {
+  if (running.value) {
+    alert('请先停止当前任务再切换风格')
+    return
+  }
+  const label = val ? styleLabel(val) : '全局默认风格'
+  if (!confirm(`切换画面风格为「${label}」？\n\n风格改变后，需重新生成「角色」和「分镜画面」才生效（旧图不会自动变）。`)) return
+  try {
+    await updateProjectSettings(route.params.id, { image_style: val })
+    await loadProject()
+  } catch (e) {
+    alert('切换失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+const handleNarrationChange = async (val) => {
+  if (running.value) {
+    alert('请先停止当前任务再切换旁白模式')
+    return
+  }
+  const label = { full: '全程旁白', smart: '智能旁白', off: '无旁白' }[val] || val
+  if (!confirm(`切换旁白模式为「${label}」？\n\n需重新生成剧本才会生效。`)) return
+  try {
+    await updateProjectSettings(route.params.id, { narration_mode: val })
+    await loadProject()
+  } catch (e) {
+    alert('切换失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+const handleGenerateAudiofx = async () => {
+  if (running.value) { alert('当前有任务在运行'); return }
+  running.value = true
+  try {
+    const started = await runWithBudget((force) => generateAudiofx(route.params.id, force), '音效/环境/BGM')
+    if (!started) { running.value = false; return }
+    startPolling()
+  } catch (e) {
+    alert('失败: ' + (e.response?.data?.detail || e.message))
+    running.value = false
+  }
+}
+
+const handleDeleteAudiofx = async () => {
+  if (!confirm('确定删除所有音效/环境音/BGM 轨？')) return
+  try {
+    await deleteAudiofx(route.params.id)
+    await loadProject()
+  } catch (e) {
+    alert('删除失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+const handleComposeWithOpts = async () => {
+  if (running.value) { alert('当前有任务在运行'); return }
+  running.value = true
+  try {
+    const started = await runWithBudget((force) => stepApi.compose(route.params.id, force), '最终合成')
+    if (!started) { running.value = false; return }
+    startPolling()
+  } catch (e) {
+    alert('失败: ' + (e.response?.data?.detail || e.message))
+    running.value = false
+  }
+}
+
 const handleDeleteSingleShot = async (index) => {
   if (!confirm(`确定删除分镜 ${index + 1}？`)) return
   await deleteSingleShot(route.params.id, index)
@@ -892,6 +1028,7 @@ onMounted(async () => {
   await loadProject()
   await loadLogs()
   loadAiHistory()
+  loadStyles()
   // 已完成项目：初始即拉取最终视频
   if (project.value.status === 'done') {
     await loadFinalVideo()
@@ -918,6 +1055,16 @@ onUnmounted(() => {
 .header-actions { display: flex; gap: 8px; align-items: center; }
 .tts-seg { display: inline-flex; gap: 4px; border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
 .tts-seg .btn { padding: 3px 10px; font-size: 11px; }
+.style-select {
+  padding: 3px 8px;
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+}
+.style-select:focus { outline: none; border-color: var(--primary); }
 
 /* 流水线 */
 .pipeline {
@@ -1387,6 +1534,22 @@ onUnmounted(() => {
   margin-top: 16px;
   border-top: 1px solid var(--border);
   padding-top: 12px;
+}
+
+/* 音频增强轨 */
+.audio-track-info {
+  display: flex;
+  gap: 20px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
 }
 .output-history-hd {
   font-size: 12px;

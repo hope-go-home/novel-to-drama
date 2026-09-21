@@ -62,6 +62,18 @@
         </p>
       </div>
 
+      <!-- 画面风格 -->
+      <div class="form-section">
+        <label>画面风格</label>
+        <select v-model="imageStyle" class="select-input">
+          <option value="">跟随全局默认</option>
+          <option v-for="s in styles" :key="s.key" :value="s.key">{{ styleLabel(s.key) }}</option>
+        </select>
+        <p class="text-xs text-dim" style="margin-top:6px">
+          风格由提示词控制，同一个模型即可切换（不用换模型）；创建后也能在项目页更改，改动后需重跑「角色/分镜」生效。
+        </p>
+      </div>
+
       <div class="form-actions">
         <button
           class="btn btn-primary"
@@ -78,27 +90,40 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { createProject, getProjects, importCharacters } from '../api'
+import { createProject, getProjects, importCharacters, getStyles } from '../api'
 
 const router = useRouter()
 const name = ref('')
 const novelText = ref('')
 const useTts = ref(true)
+const imageStyle = ref('')
+const styles = ref([])
 const submitting = ref(false)
 const existingProjects = ref([])
 const importFrom = ref('')
+
+const STYLE_LABELS = {
+  anime: '日系动漫', cinematic: '电影感', realistic: '写实电影', ink: '国风水墨',
+  guofeng: '国风插画', cyberpunk: '赛博朋克', '3d': '3D/皮克斯', korean: '韩漫',
+  watercolor: '水彩', comic: '美漫',
+}
+const styleLabel = (k) => STYLE_LABELS[k] || k
 
 onMounted(async () => {
   try {
     const { data } = await getProjects()
     existingProjects.value = data.filter(p => p.status !== 'created')
   } catch (e) {}
+  try {
+    const { data } = await getStyles()
+    styles.value = data.styles || []
+  } catch (e) {}
 })
 
 const submit = async () => {
   submitting.value = true
   try {
-    const { data } = await createProject({ name: name.value.trim(), novel_text: novelText.value.trim(), use_tts: useTts.value })
+    const { data } = await createProject({ name: name.value.trim(), novel_text: novelText.value.trim(), use_tts: useTts.value, image_style: imageStyle.value })
     const newId = data.project_id
 
     // 如果选择了复用角色

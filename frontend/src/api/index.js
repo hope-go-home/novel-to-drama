@@ -18,6 +18,7 @@ export const getProject = (id) => api.get(`/projects/${id}`)
 export const deleteProject = (id) => api.delete(`/projects/${id}`)
 export const getResult = (id) => api.get(`/projects/${id}/result`)
 export const updateProjectSettings = (id, data) => api.post(`/projects/${id}/settings`, data)
+export const getStyles = () => api.get('/styles')
 export const getOutputs = (id) => api.get(`/projects/${id}/outputs`)
 export const deleteOutputFile = (id, filename) => api.delete(`/projects/${id}/output/${encodeURIComponent(filename)}`)
 
@@ -35,7 +36,9 @@ export const generateCharacters = (id, force) => api.post(`/projects/${id}/gener
 export const generateShots = (id, force) => api.post(`/projects/${id}/generate-shots`, null, { params: withForce(force) })
 export const generateAudio = (id, force) => api.post(`/projects/${id}/generate-audio`, null, { params: withForce(force) })
 export const generateVideos = (id, force) => api.post(`/projects/${id}/generate-videos`, null, { params: withForce(force) })
-export const composeVideo = (id, force) => api.post(`/projects/${id}/compose`, null, { params: withForce(force) })
+export const composeVideo = (id, force, body) => api.post(`/projects/${id}/compose`, body || {}, { params: withForce(force) })
+export const generateAudiofx = (id, force) => api.post(`/projects/${id}/generate-audiofx`, null, { params: withForce(force) })
+export const deleteAudiofx = (id) => api.delete(`/projects/${id}/audiofx`)
 
 // 成本 / 质量 / 单镜重做
 export const getBudget = (id) => api.get(`/projects/${id}/budget`)

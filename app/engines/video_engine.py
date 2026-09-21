@@ -1,5 +1,5 @@
 """AI 视频生成引擎 - 分镜画面 → 动态视频片段
-使用阿里云 DashScope 万相 Wan2.7 (wan2.7-r2v) 参考图生视频 API
+使用阿里云 DashScope 万相 Wan 图生视频 API（i2v 首帧 / r2v 参考图，按 VIDEO_MODEL 自动适配协议）
 """
 import httpx
 import asyncio
@@ -26,6 +26,35 @@ def resolve_media_type() -> str:
     return "first_frame"
 
 
+def is_i2v_model() -> bool:
+    """是否为 i2v（首帧图生视频）模型（如 wan2.6-i2v / wan2.7-i2v）。
+    均不支持 ratio 参数（宽高比随首帧图）。
+    """
+    m = (VIDEO_MODEL or "").lower()
+    return "i2v" in m
+
+
+def uses_new_i2v_protocol() -> bool:
+    """是否为"新版图生视频协议"的 i2v 模型（wan2.7-i2v 及以后）。
+    新版协议首帧放在 input.media=[{type:first_frame,url}]，不再使用 input.img_url。
+    """
+    m = (VIDEO_MODEL or "").lower()
+    return "i2v" in m and ("2.7" in m or "3." in m)
+
+
+def build_video_input(prompt: str, data_uri: str) -> dict:
+    """按模型协议构造请求的 input 对象。
+    - 老版 i2v（wan2.6 及更早）：首帧图放 input.img_url
+    - 新版 i2v（wan2.7+）/ r2v：统一放 input.media（首帧 type=first_frame / 参考图 type=reference_image）
+    """
+    if is_i2v_model() and not uses_new_i2v_protocol():
+        return {"prompt": prompt, "img_url": data_uri}
+    return {
+        "prompt": prompt,
+        "media": [{"type": resolve_media_type(), "url": data_uri}],
+    }
+
+
 def _get_media_duration(media_path: str) -> float:
     """获取音视频文件时长（秒）；缺失/失败返回 0.0（统一委托 ffmpeg_utils）"""
     from ..utils.ffmpeg_utils import probe_duration
@@ -39,8 +68,9 @@ def build_video_prompt(shot: Shot, use_tts: bool = True) -> str:
     use_tts=False（AI 原声模式）：要求角色真实发声说出台词，保留视频自带对白/环境声
     """
     parts = []
-    # 参考图指代
-    parts.append("Based on the scene in Image 1")
+    # 参考图指代（仅 r2v 参考图模型需要；i2v 首帧模型不传此句）
+    if not is_i2v_model():
+        parts.append("Based on the scene in Image 1")
 
     if shot.video_prompt:
         parts.append(shot.video_prompt)
@@ -101,7 +131,7 @@ async def _generate_video_clip(
     duration: int,
     output_path: Path,
 ) -> str:
-    """调用 DashScope wan2.7-r2v 图生视频"""
+    """调用 DashScope 万相图生视频（按 VIDEO_MODEL 自动适配 i2v 新版/老版协议）"""
     if not DASHSCOPE_API_KEY:
         raise ValueError("未配置 DASHSCOPE_API_KEY")
 
@@ -116,21 +146,25 @@ async def _generate_video_clip(
         image_base64 = base64.b64encode(f.read()).decode()
     data_uri = f"data:image/png;base64,{image_base64}"
 
+    # 按模型能力构造 input：
+    # - 老版 i2v（wan2.6-i2v 等）：首帧图放 input.img_url
+    # - 新版 i2v（wan2.7-i2v 等）/ r2v：参考图放 input.media
+    input_obj = build_video_input(prompt, data_uri)
+
+    parameters = {
+        "resolution": "720P",
+        "duration": max(2, min(int(duration), 10)),
+        "prompt_extend": False,
+        "watermark": False,
+    }
+    # i2v 不支持 ratio 参数（宽高比随首帧图）；r2v 才传 ratio
+    if not is_i2v_model():
+        parameters["ratio"] = "16:9"
+
     payload = {
         "model": VIDEO_MODEL,
-        "input": {
-            "prompt": prompt,
-            "media": [
-                {"type": resolve_media_type(), "url": data_uri}
-            ],
-        },
-        "parameters": {
-            "resolution": "720P",
-            "duration": max(2, int(duration)),
-            "ratio": "16:9",
-            "prompt_extend": False,
-            "watermark": False,
-        },
+        "input": input_obj,
+        "parameters": parameters,
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:

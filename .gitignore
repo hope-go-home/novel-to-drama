@@ -25,5 +25,10 @@ test_*.py
 # Projects data (contains generated assets)
 projects/
 
+# 本地音频素材（体积大/版权，保留 audio_map.json）
+assets/sfx/
+assets/ambience/
+assets/bgm/
+
 # Node
 node_modules/

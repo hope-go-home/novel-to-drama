@@ -5,7 +5,7 @@ import httpx
 import asyncio
 import base64
 from pathlib import Path
-from ..config import ARK_API_KEY, ARK_BASE_URL, IMAGE_MODEL, IMAGE_SIZE, get_style_prefix
+from ..config import ARK_API_KEY, ARK_BASE_URL, IMAGE_MODEL, IMAGE_SIZE, get_style_prompt
 from ..models import Shot, CharacterViews
 
 
@@ -52,9 +52,10 @@ def _get_character_description(character_name: str, character_views: list[Charac
 def build_shot_image_prompt(
     shot: Shot,
     character_views: list[CharacterViews] = None,
+    style_key: str = None,
 ) -> str:
     """为分镜构建图像生成 prompt，参考角色设计"""
-    style = get_style_prefix()
+    style = get_style_prompt(style_key)
     prompt_parts = [style]
 
     # 添加角色外貌描述（如果有）
@@ -150,6 +151,7 @@ async def generate_shot_images(
     shots: list[Shot],
     project_dir: Path,
     character_views: list[CharacterViews] = None,
+    style_key: str = None,
 ) -> list[str]:
     """为所有分镜生成画面（图生图模式）"""
     shots_dir = project_dir / "shots"
@@ -181,7 +183,7 @@ async def generate_shot_images(
                             reference_images.append(ref_b64)
                         break
 
-        prompt = build_shot_image_prompt(shot, character_views or [])
+        prompt = build_shot_image_prompt(shot, character_views or [], style_key)
 
         try:
             mode = "图生图" if reference_images else "文生图"
@@ -202,6 +204,7 @@ async def generate_shot_image_single(
     shot: Shot,
     output_path: Path,
     character_views: list[CharacterViews] = None,
+    style_key: str = None,
 ) -> str:
     """生成单张分镜画面"""
     all_character_names = [cv.character_name for cv in character_views] if character_views else []
@@ -217,5 +220,5 @@ async def generate_shot_image_single(
                         reference_images.append(ref_b64)
                     break
 
-    prompt = build_shot_image_prompt(shot, character_views or [])
+    prompt = build_shot_image_prompt(shot, character_views or [], style_key)
     return await _generate_shot_image(prompt, output_path, reference_images)

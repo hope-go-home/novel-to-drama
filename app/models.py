@@ -62,6 +62,8 @@ class Scene(BaseModel):
     location: str = Field(description="地点")
     time: str = Field(default="", description="时间")
     mood: str = Field(default="", description="氛围")
+    bgm: str = Field(default="", description="背景音乐情绪(悬疑/紧张/危险/悲伤/温馨/搞笑/轻松/燃/浪漫)")
+    ambience: str = Field(default="", description="场所环境音描述，如 夜晚虫鸣、风声")
     shots: list[Shot] = []
 
 
@@ -95,6 +97,7 @@ class ProjectCreate(BaseModel):
     name: str = Field(description="项目名称")
     novel_text: str = Field(description="小说文本")
     use_tts: bool = Field(default=True, description="是否使用 TTS 配音（关则保留 AI 视频原声拼接）")
+    image_style: str = Field(default="", description="画面风格 key（留空用全局设置）")
 
 
 class Project(BaseModel):
@@ -106,3 +109,5 @@ class Project(BaseModel):
     characters: list[CharacterViews] = []
     error_message: str = ""
     use_tts: bool = Field(default=True, description="是否使用 TTS 配音（关则保留 AI 视频原声拼接）")
+    image_style: str = Field(default="", description="画面风格 key（留空用全局设置）")
+    narration_mode: str = Field(default="smart", description="旁白模式: full(全程)/smart(智能,仅无对白镜头)/off(无)")

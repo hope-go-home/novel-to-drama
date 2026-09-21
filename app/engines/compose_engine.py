@@ -3,6 +3,10 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from ..models import Shot
+from ..config import (
+    SFX_VOLUME, AMBIENCE_VOLUME, BGM_VOLUME, BGM_DUCK,
+    DUCK_SFX_AMB, KEEP_VIDEO_AUDIO,
+)
 
 # 使用 imageio-ffmpeg 内置的 FFmpeg
 try:
@@ -102,9 +106,17 @@ def _format_subtitle_for_drawtext(shot: Shot) -> dict:
             break
         lines = _reflow(width)
 
-    # 行数对应的字号：3行28、4行24、5行21、6行18……保证总高 ~200px 内
-    fontsize = max(16, int(200 / max(len(lines), 1) / 1.35))
-    return {"text": "\n".join(lines), "lines": len(lines), "fontsize": fontsize}
+    # 固定字号（1920×1080 画布下的合适大小），行数多时略微缩小，避免超出画面
+    n = max(len(lines), 1)
+    if n <= 3:
+        fontsize = 44
+    elif n == 4:
+        fontsize = 38
+    elif n == 5:
+        fontsize = 34
+    else:
+        fontsize = 30
+    return {"text": "\n".join(lines), "lines": n, "fontsize": fontsize}
 
 
 def _escape_drawtext(text: str) -> str:
@@ -124,11 +136,19 @@ async def compose_final_video(
     audio_paths: list[dict],
     project_dir: Path,
     use_tts: bool = True,
+    scene_indices: list = None,
+    audio_tracks: dict = None,
+    with_sfx: bool = True,
+    with_ambience: bool = True,
+    with_bgm: bool = True,
 ) -> str:
     """
     合成最终视频。
-    use_tts=True : 丢弃 AI 视频原声，只保留 TTS 对白/旁白 + 字幕
-    use_tts=False: 保留 AI 视频原画面与原声直接拼接，不叠加配音
+    use_tts=True : 丢弃 AI 视频原声，保留 TTS 对白/旁白 + 音效/环境音/BGM + 字幕
+    use_tts=False: 保留 AI 视频原画面与原声直接拼接，不叠加配音/音效
+    audio_tracks : 由 audio_fx_engine 生成的 {"sfx":[...], "ambience":[...], "bgm": path}
+    with_sfx/with_ambience/with_bgm : 合成时是否混入对应轨（前端可选）
+    scene_indices : 每个镜头所属场景下标，用于转场淡入淡出
     """
     output_dir = project_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -150,6 +170,19 @@ async def compose_final_video(
         else:
             dialogue_audio = audio_info.get("dialogue_audio")
             narrator_audio = audio_info.get("narrator_audio")
+
+        # 音效 / 环境音轨（来自 audio_tracks）
+        sfx_path = None
+        amb_path = None
+        if use_tts and audio_tracks:
+            if with_sfx:
+                lst = audio_tracks.get("sfx") or []
+                if i < len(lst):
+                    sfx_path = lst[i]
+            if with_ambience:
+                lst = audio_tracks.get("ambience") or []
+                if i < len(lst):
+                    amb_path = lst[i]
 
         # 确定时长
         if use_tts:
@@ -183,26 +216,41 @@ async def compose_final_video(
 
         cmd = [FFMPEG_PATH, "-y"]
 
-        # 视频输入
+        # 视频输入（统一归一化到 1920×1080，保证字幕字号一致且不出画）
+        normalize = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
         if video_source:
             video_duration = _get_media_duration(video_source)
             cmd.extend(["-i", video_source])
             video_label = "0:v"
             has_video_audio = _has_audio_stream(video_source)
+            video_filters.insert(0, normalize)  # 先归一化，再应用字幕
             # 视频不够长时，冻结最后一帧延长（不循环播放）
             if video_duration < duration:
                 pad_time = duration - video_duration
-                video_filters.insert(0, f"tpad=stop_mode=clone:stop_duration={pad_time}")
+                video_filters.insert(1, f"tpad=stop_mode=clone:stop_duration={pad_time}")
         else:
             cmd.extend(["-loop", "1", "-i", image_source])
-            video_filters.insert(0, f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2")
+            video_filters.insert(0, normalize)
             video_label = "0:v"
             has_video_audio = False
 
-        # 音频输入（对话 + 旁白）
+        # 转场：逐段淡入淡出（场景边界 0.2s，同场景 0.1s；避免明显闪黑）
+        if scene_indices and i < len(scene_indices):
+            cur = scene_indices[i]
+            prev = scene_indices[i - 1] if (i > 0 and i - 1 < len(scene_indices)) else None
+            nxt = scene_indices[i + 1] if (i + 1 < len(scene_indices)) else None
+            fin = 0.2 if (prev is not None and cur != prev) else (0.1 if prev is not None else 0)
+            fout = 0.2 if (nxt is not None and cur != nxt) else (0.1 if nxt is not None else 0)
+            fin = min(fin, duration / 2)
+            fout = min(fout, duration / 2)
+            if fin > 0:
+                video_filters.append(f"fade=t=in:st=0:d={fin:.3f}")
+            if fout > 0:
+                video_filters.append(f"fade=t=out:st={max(0.0, duration - fout):.3f}:d={fout:.3f}")
+
+        # 音频输入（对白 + 旁白 + 音效 + 环境音）
         next_input_idx = 1
-        dialogue_idx = None
-        narrator_idx = None
+        dialogue_idx = narrator_idx = sfx_idx = amb_idx = None
         if use_tts and dialogue_audio:
             dialogue_idx = next_input_idx
             cmd.extend(["-i", dialogue_audio])
@@ -211,49 +259,83 @@ async def compose_final_video(
             narrator_idx = next_input_idx
             cmd.extend(["-i", narrator_audio])
             next_input_idx += 1
+        if sfx_path and Path(sfx_path).exists():
+            sfx_idx = next_input_idx
+            cmd.extend(["-i", sfx_path])
+            next_input_idx += 1
+        if amb_path and Path(amb_path).exists():
+            amb_idx = next_input_idx
+            cmd.extend(["-i", amb_path])
+            next_input_idx += 1
 
-        # 构建音频逻辑
-        voice_inputs = []
+        # 构建音频逻辑（对白/旁白 = 人声；音效/环境音 = 铺底，可被人声闪避）
+        voice_labels = []
+        bed_labels = []
         if dialogue_idx is not None:
-            voice_inputs.append(f"[{dialogue_idx}:a]")
+            filter_parts.append(
+                f"[{dialogue_idx}:a]volume=1.0,atrim=0:{duration},asetpts=PTS-STARTPTS,"
+                f"aformat=sample_rates=44100:channel_layouts=stereo[vd]"
+            )
+            voice_labels.append("[vd]")
         if narrator_idx is not None:
-            voice_inputs.append(f"[{narrator_idx}:a]")
+            filter_parts.append(
+                f"[{narrator_idx}:a]volume=0.7,atrim=0:{duration},asetpts=PTS-STARTPTS,"
+                f"aformat=sample_rates=44100:channel_layouts=stereo[vn]"
+            )
+            voice_labels.append("[vn]")
+        if sfx_idx is not None:
+            filter_parts.append(
+                f"[{sfx_idx}:a]volume={SFX_VOLUME},atrim=0:{duration},asetpts=PTS-STARTPTS,"
+                f"aformat=sample_rates=44100:channel_layouts=stereo[sfxm]"
+            )
+            bed_labels.append("[sfxm]")
+        if amb_idx is not None:
+            filter_parts.append(
+                f"[{amb_idx}:a]volume={AMBIENCE_VOLUME},atrim=0:{duration},asetpts=PTS-STARTPTS,"
+                f"aformat=sample_rates=44100:channel_layouts=stereo[ambm]"
+            )
+            bed_labels.append("[ambm]")
+
+        # 人声闪避：有台词时，音效/环境音按人声做 sidechain 压缩（不抢戏）
+        if DUCK_SFX_AMB and voice_labels and bed_labels:
+            if len(voice_labels) == 1:
+                voice_src = voice_labels[0]
+            else:
+                voice_src = "[voice]"
+                filter_parts.append(
+                    f"{''.join(voice_labels)}amix=inputs={len(voice_labels)}:duration=longest:normalize=0[voice]"
+                )
+            n_bed = len(bed_labels)
+            keys = "".join(f"[vkey{k}]" for k in range(n_bed))
+            filter_parts.append(f"{voice_src}asplit={n_bed + 1}[vkeep]{keys}")
+            for k, bed in enumerate(bed_labels):
+                filter_parts.append(
+                    f"{bed}[vkey{k}]sidechaincompress=threshold=0.05:ratio=8:attack=15:release=250[duck{k}]"
+                )
+            mix_labels = ["[vkeep]"] + [f"[duck{k}]" for k in range(n_bed)]
+        else:
+            mix_labels = voice_labels + bed_labels
 
         if not use_tts:
-            # 原声模式：直接取 AI 视频原音轨；无则静音
-            if has_video_audio:
+            # 原声模式：KEEP_VIDEO_AUDIO 时取 AI 视频原音轨；否则静音
+            if has_video_audio and KEEP_VIDEO_AUDIO:
                 audio_map = "0:a"
             else:
                 cmd.extend(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
                 audio_map = f"{next_input_idx}:a"
-        elif voice_inputs:
-            # 配音模式：TTS 人声(对话1.0 / 旁白0.85) + AI 视频原声(环境音) 垫底
-            voice_labels = []
-            if dialogue_idx is not None:
-                filter_parts.append(
-                    f"[{dialogue_idx}:a]volume=1.0,atrim=0:{duration},asetpts=PTS-STARTPTS,"
-                    f"aformat=sample_rates=44100:channel_layouts=stereo[vd]"
-                )
-                voice_labels.append("[vd]")
-            if narrator_idx is not None:
-                filter_parts.append(
-                    f"[{narrator_idx}:a]volume=0.7,atrim=0:{duration},asetpts=PTS-STARTPTS,"
-                    f"aformat=sample_rates=44100:channel_layouts=stereo[vn]"
-                )
-                voice_labels.append("[vn]")
-            if len(voice_labels) == 1:
-                voice_filter = f"{voice_labels[0]}anull[voice]"
+        elif mix_labels:
+            # 配音模式：人声 + 音效 + 环境音 叠加
+            if len(mix_labels) == 1:
+                filter_parts.append(f"{mix_labels[0]}anull[outa]")
             else:
-                joined = "".join(voice_labels)
-                voice_filter = f"{joined}concat=n={len(voice_labels)}:v=0:a=1[voice]"
-            filter_parts.append(voice_filter)
-            # 配音镜头只放 TTS 人声，不掺 AI 原声（避免自带说话/环境与配音重叠）
-            audio_map = "[voice]"
-        elif has_video_audio:
-            # 配音模式但该镜头无台词：保留视频原声（环境音）
+                joined = "".join(mix_labels)
+                filter_parts.append(f"{joined}amix=inputs={len(mix_labels)}:duration=longest:normalize=0[outa]")
+            audio_map = "[outa]"
+        elif has_video_audio and KEEP_VIDEO_AUDIO:
+            # 配音模式但该镜头无台词：仅在 KEEP_VIDEO_AUDIO 时保留视频原声
             audio_map = "0:a"
         else:
-            # 无任何音频：静音
+            # 无任何音频：静音（默认丢弃 i2v 自动音）
             cmd.extend(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
             audio_map = f"{next_input_idx}:a"
 
@@ -337,9 +419,59 @@ async def compose_final_video(
         if result.returncode != 0:
             raise ValueError(f"拼接失败: {result.stderr[-300:]}")
 
-    # 清理临时文件
+    # 清理临时片段
     for clip in temp_clips:
         clip.unlink(missing_ok=True)
     concat_list.unlink(missing_ok=True)
+
+    # 第三步：BGM（可选，带人声闪避）+ 响度归一化
+    bgm_path = None
+    if with_bgm and audio_tracks:
+        bgm_path = audio_tracks.get("bgm")
+
+    mixed_output = output_dir / f"_mixed_{stamp}.mp4"
+    if bgm_path and Path(bgm_path).exists():
+        if BGM_DUCK:
+            fc = (
+                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={BGM_VOLUME}[bg];"
+                f"[0:a]aformat=sample_rates=44100:channel_layouts=stereo[vs];"
+                f"[bg][vs]sidechaincompress=threshold=0.05:ratio=6:attack=20:release=300[ducked];"
+                f"[vs][ducked]amix=inputs=2:duration=first:normalize=0[mix];"
+                f"[mix]loudnorm=I=-14:TP=-1.5:LRA=11[outa]"
+            )
+        else:
+            fc = (
+                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={BGM_VOLUME}[bg];"
+                f"[0:a]aformat=sample_rates=44100:channel_layouts=stereo[vs];"
+                f"[vs][bg]amix=inputs=2:duration=first:normalize=0[mix];"
+                f"[mix]loudnorm=I=-14:TP=-1.5:LRA=11[outa]"
+            )
+        mix_cmd = [
+            FFMPEG_PATH, "-y", "-i", str(final_output), "-i", str(bgm_path),
+            "-filter_complex", fc, "-map", "0:v", "-map", "[outa]",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
+            str(mixed_output),
+        ]
+        r = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode == 0:
+            final_output.unlink(missing_ok=True)
+            mixed_output.rename(final_output)
+        else:
+            print(f"BGM 混音失败，保留无 BGM 版本: {r.stderr[-300:]}")
+            mixed_output.unlink(missing_ok=True)
+    else:
+        # 无 BGM：仅做响度归一化
+        norm_cmd = [
+            FFMPEG_PATH, "-y", "-i", str(final_output),
+            "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
+            str(mixed_output),
+        ]
+        r = subprocess.run(norm_cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode == 0:
+            final_output.unlink(missing_ok=True)
+            mixed_output.rename(final_output)
+        else:
+            mixed_output.unlink(missing_ok=True)
 
     return str(final_output)
