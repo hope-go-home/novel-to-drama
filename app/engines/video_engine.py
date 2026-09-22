@@ -61,6 +61,18 @@ def _get_media_duration(media_path: str) -> float:
     return probe_duration(media_path)
 
 
+def clip_filename(index: int, use_tts: bool = True) -> str:
+    """视频片段文件名：TTS 模式沿用 clip_XXXX.mp4（兼容旧片段），AI 原声模式用 clip_XXXX_orig.mp4。
+    两种模式各存一份，来回切换互不覆盖、无需重复生成。
+    """
+    return f"clip_{index:04d}.mp4" if use_tts else f"clip_{index:04d}_orig.mp4"
+
+
+def video_index_filename(use_tts: bool = True) -> str:
+    """视频索引文件名（每个模式各一份）"""
+    return "video_paths.json" if use_tts else "video_paths_orig.json"
+
+
 def build_video_prompt(shot: Shot, use_tts: bool = True) -> str:
     """构建视频生成 prompt（用场景图作首帧，注入台词/情绪/动作，并保证角色形象一致）
 
@@ -72,46 +84,53 @@ def build_video_prompt(shot: Shot, use_tts: bool = True) -> str:
     if not is_i2v_model():
         parts.append("Based on the scene in Image 1")
 
+    # ① 动作/镜头描述放最前面（模型注意力最高）
     if shot.video_prompt:
         parts.append(shot.video_prompt)
     elif shot.description:
         parts.append(shot.description)
 
-    # 台词/动作注入 + 角色一致性提示
+    # ② 台词/动作注入（中等优先级）
     lines = shot.dialogues or []
     has_speech = any(d.line.strip() for d in lines)
     if has_speech:
-        parts.append("Keep every character's appearance exactly identical to their established look in previous scenes")
         for d in lines:
             if d.line.strip():
                 line = d.line.strip()
                 emotion = d.emotion or "平静"
                 action = f", {d.action.strip()}" if d.action and d.action.strip() else ""
                 if use_tts:
-                    # TTS 模式：无声对口型，人声由后期配音
                     parts.append(
                         f'Character {d.character} mouths the line silently: "{line}" '
                         f"with a {emotion} facial expression and lip movement only{action}"
                     )
                 else:
-                    # 原声模式：角色要真实发声说出台词（成片直接使用视频自带人声）
                     parts.append(
                         f'Character {d.character} says aloud the line: "{line}" '
                         f"with a {emotion} tone of voice and natural speech{action}"
                     )
-        if use_tts:
-            # TTS 模式对白由后期配音提供，禁止视频自带任何人声/朗读声
+        parts.append("Keep every character's appearance exactly identical to their established look in previous scenes")
+
+    # ③ 强制注入运动关键词（i2v 模型需要明确的运动指令才会做出明显动作）
+    if is_i2v_model():
+        motion_boost = "cinematic dynamic scene, dramatic character movement, " \
+                       "expressive gestures and body language, camera motion, " \
+                       "particles and environmental effects in motion"
+        parts.append(motion_boost)
+
+    # ④ TTS 禁音指令放最后（避免稀释动作描述）
+    if use_tts:
+        if has_speech:
             parts.append(
                 "The dialogue is dubbed later; generate NO audible speech, no vocals, "
-                "no English or any language narration audio, no mouthing sounds. "
-                "Audio track (if any) should contain only ambient/environmental sound effects such as wind, footsteps or background noise."
+                "no narration audio. Audio track should contain only ambient/environmental sounds."
             )
-    elif shot.narrator and shot.narrator.strip() and use_tts:
-        parts.append(
-            "No character speaks aloud or mouths anything; this scene is silent, "
-            "its narration is added later as voice-over. "
-            "Audio track (if any) should contain only ambient/environmental sound effects, no speech or vocals."
-        )
+        elif shot.narrator and shot.narrator.strip():
+            parts.append(
+                "No character speaks aloud or mouths anything; this scene is silent, "
+                "its narration is added later as voice-over. "
+                "Audio track should contain only ambient/environmental sounds, no speech."
+            )
 
     camera_map = {
         "推": "slow zoom in",
@@ -154,8 +173,11 @@ async def _generate_video_clip(
     parameters = {
         "resolution": "720P",
         "duration": max(2, min(int(duration), 10)),
-        "prompt_extend": False,
+        "prompt_extend": True,
         "watermark": False,
+        "negative_prompt": "static image, no movement, frozen, still frame, slideshow, "
+                           "low quality, blurry, distorted face, deformed hands, "
+                           "multiple limbs, bad anatomy, watermark, text overlay",
     }
     # i2v 不支持 ratio 参数（宽高比随首帧图）；r2v 才传 ratio
     if not is_i2v_model():
@@ -233,7 +255,7 @@ async def generate_video_clips(
     clips_dir = project_dir / "video_clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
 
-    index_path = project_dir / "video_paths.json"
+    index_path = project_dir / video_index_filename(use_tts)
     total = len(shots)
 
     def _flush(indexes: list):
@@ -254,7 +276,7 @@ async def generate_video_clips(
             _flush(results)
             continue
 
-        output_path = clips_dir / f"clip_{i:04d}.mp4"
+        output_path = clips_dir / clip_filename(i, use_tts)
 
         # 检查视频是否已存在，存在则跳过生成
         if output_path.exists():

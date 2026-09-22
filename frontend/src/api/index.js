@@ -59,4 +59,12 @@ export const deleteOutput = (id) => api.delete(`/projects/${id}/output`)
 export const deleteSingleShot = (id, index) => api.delete(`/projects/${id}/shot/${index}`)
 export const deleteSingleVideo = (id, index) => api.delete(`/projects/${id}/video/${index}`)
 
+// 本地音频素材库（音效/环境音/BGM）
+export const getAssets = (category) => api.get(`/assets/${category}`)
+export const uploadAsset = (category, formData) => api.post(`/assets/${category}`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+export const updateAssetNames = (category, filename, names) => api.put(`/assets/${category}/${encodeURIComponent(filename)}`, { names })
+export const deleteAsset = (category, filename) => api.delete(`/assets/${category}/${encodeURIComponent(filename)}`)
+export const getSfxVol = () => api.get('/assets/sfx_vol/all')
+export const updateSfxVol = (data) => api.put('/assets/sfx_vol/all', data)
+
 export default api

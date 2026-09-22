@@ -4,9 +4,22 @@
 import asyncio
 import json
 import httpx
-from ..config import ARK_API_KEY, ARK_BASE_URL, LLM_MODEL
+from ..config import ARK_API_KEY, ARK_BASE_URL, LLM_MODEL, ASSETS_DIR
 from ..models import Script
 from ..utils.prompts import SCRIPT_SYSTEM_PROMPT, SCRIPT_USER_PROMPT
+
+
+def _sfx_catalog() -> str:
+    """从本地音效映射表取出候选音效名（按素材去重），供 LLM 约束音效命名"""
+    try:
+        m = json.loads((ASSETS_DIR / "audio_map.json").read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    seen = {}
+    for k, v in (m.get("sfx") or {}).items():
+        if v not in seen:
+            seen[v] = k
+    return "、".join(seen.values())
 
 
 async def generate_script(novel_text: str) -> Script:
@@ -26,7 +39,8 @@ async def generate_script(novel_text: str) -> Script:
         "model": LLM_MODEL,
         "messages": [
             {"role": "system", "content": SCRIPT_SYSTEM_PROMPT},
-            {"role": "user", "content": SCRIPT_USER_PROMPT.format(novel_text=novel_text)},
+            {"role": "user", "content": SCRIPT_USER_PROMPT.format(
+                novel_text=novel_text, sfx_catalog=_sfx_catalog())},
         ],
         "temperature": 0.7,
         "max_tokens": 8000,

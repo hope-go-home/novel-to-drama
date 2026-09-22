@@ -34,7 +34,7 @@ AMBIENCE_ENABLED = os.getenv("AMBIENCE_ENABLED", "true").lower() == "true"
 BGM_ENABLED = os.getenv("BGM_ENABLED", "true").lower() == "true"
 SFX_VOLUME = float(os.getenv("SFX_VOLUME", "0.8"))
 AMBIENCE_VOLUME = float(os.getenv("AMBIENCE_VOLUME", "0.4"))
-BGM_VOLUME = float(os.getenv("BGM_VOLUME", "0.12"))
+BGM_VOLUME = float(os.getenv("BGM_VOLUME", "0.22"))
 BGM_DUCK = os.getenv("BGM_DUCK", "true").lower() == "true"
 # 人声出现时对音效/环境音也做动态闪避（sidechain）
 DUCK_SFX_AMB = os.getenv("DUCK_SFX_AMB", "true").lower() == "true"
@@ -70,6 +70,8 @@ SHOT_MAX_CHARS = int(os.getenv("SHOT_MAX_CHARS", "45"))
 # 通用
 IMAGE_STYLE = os.getenv("IMAGE_STYLE", "anime")
 VIDEO_DURATION = int(os.getenv("VIDEO_DURATION", "5"))
+# 生图参考图：是否把角色设定图裁成"半身"再作参考（避免模型照抄全身站姿/白底构图）
+IMAGE_REF_BUST_CROP = os.getenv("IMAGE_REF_BUST_CROP", "true").lower() == "true"
 
 STYLE_PROMPTS = {
     "anime": "anime style, high quality, detailed, vibrant colors, manga illustration",

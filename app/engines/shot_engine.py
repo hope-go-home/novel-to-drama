@@ -1,25 +1,39 @@
 """分镜画面引擎 - 分镜脚本 → 生成场景画面
 使用 Seedream 生图模型（支持图生图）
 """
+import io
 import httpx
 import asyncio
 import base64
 from pathlib import Path
-from ..config import ARK_API_KEY, ARK_BASE_URL, IMAGE_MODEL, IMAGE_SIZE, get_style_prompt
+from PIL import Image
+from ..config import (
+    ARK_API_KEY, ARK_BASE_URL, IMAGE_MODEL, IMAGE_SIZE, get_style_prompt,
+    IMAGE_REF_BUST_CROP,
+)
 from ..models import Shot, CharacterViews
 
 
-def _image_to_base64(image_path: str) -> str:
-    """将图片文件转为 base64 data URI"""
+def _image_to_base64(image_path: str, bust_crop: bool = False) -> str:
+    """将图片文件转为 base64 data URI。
+    bust_crop=True：裁成"头部+上半身"再作参考，避免模型照抄全身站姿与白底构图。
+    """
     path = Path(image_path)
     if not path.exists():
         return ""
-    suffix = path.suffix.lower().lstrip(".")
-    mime_map = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
-    mime = mime_map.get(suffix, "image/png")
-    with open(path, "rb") as f:
-        data = base64.b64encode(f.read()).decode()
-    return f"data:{mime};base64,{data}"
+    try:
+        img = Image.open(path).convert("RGB")
+    except Exception:
+        return ""
+    if bust_crop:
+        w, h = img.size
+        # 只取"头部+肩部"（避开张开的双臂/全身姿势），避免模型照抄参考站姿
+        box = (int(w * 0.30), 0, int(w * 0.70), int(h * 0.35))
+        img = img.crop(box)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{data}"
 
 
 def _get_shot_characters(shot: Shot, all_character_names: list[str]) -> list[str]:
@@ -54,11 +68,30 @@ def build_shot_image_prompt(
     character_views: list[CharacterViews] = None,
     style_key: str = None,
 ) -> str:
-    """为分镜构建图像生成 prompt，参考角色设计"""
+    """为分镜构建图像生成 prompt：动作/构图放最前，角色外貌只做锚定，明确禁止照抄参考图姿势。"""
     style = get_style_prompt(style_key)
-    prompt_parts = [style]
+    prompt_parts = []
 
-    # 添加角色外貌描述（如果有）
+    # ① 动作/画面（最优先，模型注意力最高）
+    if shot.image_prompt:
+        prompt_parts.append(shot.image_prompt)
+    elif shot.description:
+        prompt_parts.append(shot.description)
+
+    # ② 景别
+    shot_type_map = {
+        "特写": "extreme close-up shot, face focus",
+        "中景": "medium shot, waist up",
+        "远景": "wide shot, full scene, establishing shot",
+        "全景": "full body shot, environmental portrait",
+    }
+    if shot.shot_type in shot_type_map:
+        prompt_parts.append(shot_type_map[shot.shot_type])
+
+    # ③ 风格
+    prompt_parts.append(style)
+
+    # ④ 角色外貌（锚定长相/服装，简短放后）
     if character_views:
         shot_chars = []
         if shot.dialogues:
@@ -70,23 +103,16 @@ def build_shot_image_prompt(
         for char_name in set(shot_chars):
             char_desc = _get_character_description(char_name, character_views)
             if char_desc:
-                prompt_parts.append(f"character {char_name}: {char_desc}")
+                prompt_parts.append(f"character {char_name} appearance (keep face and outfit consistent): {char_desc}")
 
-    if shot.image_prompt:
-        prompt_parts.append(shot.image_prompt)
-    else:
-        prompt_parts.append(shot.description)
+    # ⑤ 动态要求 + 禁止照抄参考图姿势/背景
+    prompt_parts.append(
+        "dynamic action pose following the described action and camera angle, "
+        "energetic composition, motion in the scene, "
+        "do NOT copy the pose, framing or white background of any reference image; "
+        "only keep the character's face and outfit consistent"
+    )
 
-    shot_type_map = {
-        "特写": "extreme close-up shot, face focus",
-        "中景": "medium shot, waist up",
-        "远景": "wide shot, full scene, establishing shot",
-        "全景": "full body shot, environmental portrait",
-    }
-    if shot.shot_type in shot_type_map:
-        prompt_parts.append(shot_type_map[shot.shot_type])
-
-    # 16:9 横向构图，与 AI 视频画幅一致，作首帧不变形
     prompt_parts.append("horizontal 16:9 wide composition, landscape aspect ratio")
     prompt_parts.append("masterpiece, best quality, highly detailed, cinematic lighting")
     return ", ".join(prompt_parts)
@@ -172,13 +198,13 @@ async def generate_shot_images(
         # 提取镜头中的角色
         shot_characters = _get_shot_characters(shot, all_character_names)
 
-        # 收集角色正面图作为参考图
+        # 收集角色正面图作为参考图（默认裁成半身，避免照抄全身站姿）
         reference_images = []
         if character_views and shot_characters:
             for char_name in shot_characters:
                 for cv in character_views:
                     if cv.character_name == char_name and cv.front_image:
-                        ref_b64 = _image_to_base64(cv.front_image)
+                        ref_b64 = _image_to_base64(cv.front_image, bust_crop=IMAGE_REF_BUST_CROP)
                         if ref_b64:
                             reference_images.append(ref_b64)
                         break
@@ -215,7 +241,7 @@ async def generate_shot_image_single(
         for char_name in shot_characters:
             for cv in character_views:
                 if cv.character_name == char_name and cv.front_image:
-                    ref_b64 = _image_to_base64(cv.front_image)
+                    ref_b64 = _image_to_base64(cv.front_image, bust_crop=IMAGE_REF_BUST_CROP)
                     if ref_b64:
                         reference_images.append(ref_b64)
                     break

@@ -17,7 +17,7 @@ from ..config import (
 from ..models import Shot, Scene
 from ..utils.logger import add_log
 from ..utils.ffmpeg_utils import FFMPEG_PATH, probe_duration
-from ..utils.video_motion import motion_curve, find_peaks, align_starts
+from ..utils.video_motion import motion_curve, find_peaks
 
 _MAP_CACHE = None
 
@@ -47,6 +47,24 @@ def _key_str(key) -> str:
         return f"{int(key):04d}"
     except Exception:
         return str(key).replace("/", "_").replace("\\", "_")
+
+
+def _resolve_sfx_asset(name: str):
+    """匹配音效素材：先 sfx 分类；找不到再跨类回退 ambience / transition。
+    这样"风声"这类只有环境音素材的名字也能被用作音效。
+    """
+    if not name:
+        return None
+    f = _asset_path("sfx", _match_keyword("sfx", name))
+    if f:
+        return f
+    f = _asset_path("ambience", _match_keyword("ambience", name))
+    if f:
+        return f
+    f = _asset_path("sfx", _match_keyword("transition", name))
+    if f:
+        return f
+    return None
 
 
 def _match_keyword(category: str, key: str):
@@ -91,6 +109,28 @@ def _parse_vol(v) -> float:
         return 1.0
 
 
+def _sfx_volume_scale(name: str) -> float:
+    """按音效名（子串匹配）取额外音量倍率，默认 1.0（见 audio_map.json 的 sfx_vol）"""
+    m = _load_map().get("sfx_vol") or {}
+    if not m or not name:
+        return 1.0
+    nm = str(name).strip()
+    if nm in m:
+        try:
+            return float(m[nm])
+        except Exception:
+            return 1.0
+    for k, v in m.items():
+        if not k or k.startswith("_"):
+            continue
+        if k in nm or nm in k:
+            try:
+                return float(v)
+            except Exception:
+                continue
+    return 1.0
+
+
 def _run(cmd: list) -> bool:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
@@ -99,15 +139,107 @@ def _run(cmd: list) -> bool:
         return False
 
 
+def _seg_index(p: Path) -> int:
+    """从 shot_XXXX_dialogue_{j}.mp3 取出 j（用于按句顺序排序）"""
+    try:
+        return int(p.stem.rsplit("_", 1)[-1])
+    except Exception:
+        return 0
+
+
+def _dialogue_line_windows(project_dir: Path, shot_index: int, shot: Shot) -> list:
+    """推导该镜头每句对白在"对白音频"内的时间窗 [(start, end, text)]。
+    优先用逐句配音缓存 shot_XXXX_dialogue_{j}.mp3 的时长累加；无分句则退回整段一个窗口。
+    纯读取已有音频，不调用任何 TTS。
+    """
+    audio_dir = project_dir / "audio"
+    lines = shot.dialogues or []
+    segs = sorted(audio_dir.glob(f"shot_{shot_index:04d}_dialogue_*.mp3"), key=_seg_index)
+    windows = []
+    if segs:
+        t = 0.0
+        for j, p in enumerate(segs):
+            d = probe_duration(str(p))
+            if d <= 0:
+                continue
+            txt = lines[j].line if j < len(lines) else ""
+            windows.append((t, t + d, txt))
+            t += d
+        if windows:
+            return windows
+
+    merged = audio_dir / f"shot_{shot_index:04d}_dialogue.mp3"
+    if merged.exists():
+        d = probe_duration(str(merged))
+        if d > 0:
+            txt = lines[0].line if lines else ""
+            return [(0.0, d, txt)]
+    return []
+
+
+def _match_line_for_event(name: str, line_windows: list) -> int:
+    """找与该音效名最匹配的台词窗口下标；无匹配返回 -1"""
+    if not name or not line_windows:
+        return -1
+    nm = str(name).strip()
+    for k, (_s, _e, txt) in enumerate(line_windows):
+        if not txt:
+            continue
+        if nm in txt or txt in nm:
+            return k
+        for L in (3, 2):
+            if len(nm) >= L and any(nm[i:i + L] in txt for i in range(len(nm) - L + 1)):
+                return k
+    return -1
+
+
+def align_event_starts(events: list, line_windows: list = None, peaks: list = None, window: float = 0.6):
+    """计算每个音效的对齐后起点，返回 (starts, sources)。
+    events: [{"name":..., "start":...}]（按原 start 升序）
+    规则：优先吸附到"对应台词句"的起点；再在附近 window 内尝试吸附画面运动峰。
+    sources: line / line+motion / motion / script
+    """
+    peak_ts = [t for t, _ in (peaks or [])]
+    used = set()
+    starts, sources = [], []
+    for ev in events:
+        name = ev.get("name") or ""
+        target = float(ev.get("start") or 0.0)
+        src = "script"
+
+        k = _match_line_for_event(name, line_windows or [])
+        if k >= 0:
+            target = float(line_windows[k][0])
+            src = "line"
+
+        if peak_ts:
+            best_idx, best_d = None, None
+            for idx, t in enumerate(peak_ts):
+                if idx in used:
+                    continue
+                d = abs(t - target)
+                if d <= window and (best_d is None or d < best_d):
+                    best_idx, best_d = idx, d
+            if best_idx is not None:
+                used.add(best_idx)
+                target = peak_ts[best_idx]
+                src = "line+motion" if src == "line" else "motion"
+
+        starts.append(max(0.0, target))
+        sources.append(src)
+    return starts, sources
+
+
 def build_shot_sfx_track(
     shot: Shot, out_path: Path, transition_file: str = None, duration: float = 0,
     align_peaks: list = None, align_window: float = 0.6, align_debug: dict = None,
+    line_windows: list = None,
 ) -> str:
     """按 sound_effects 生成单个镜头的音效轨；无匹配返回 None。
     transition_file：若该镜头是场景起点，可在 0 秒加一个转场音效。
-    align_peaks：画面运动峰值 [(t, energy)]，提供时把音效 start 吸附到窗口内最近的峰。
-    音效 start/end 会被归一化（夹到 [0, duration]、越界丢弃、按 start 排序），
-    保证音效不会落到镜头外导致错位。
+    line_windows：该镜每句对白的时间窗，用于把音效吸附到"对应台词句"的起点。
+    align_peaks：画面运动峰值 [(t, energy)]，用于把音效吸附到画面动作时刻。
+    音效 start/end 会被归一化（夹到 [0, duration]、越界丢弃、按 start 排序）。
     """
     # 1) 收集并匹配音效事件
     events = []
@@ -115,8 +247,7 @@ def build_shot_sfx_track(
         if not isinstance(e, dict):
             continue
         name = (e.get("name") or "").strip()
-        fname = _match_keyword("sfx", name)
-        f = _asset_path("sfx", fname)
+        f = _resolve_sfx_asset(name)
         if not f:
             continue
         try:
@@ -127,21 +258,23 @@ def build_shot_sfx_track(
             end = float(e.get("end") or 0.0)
         except Exception:
             end = 0.0
-        events.append((f, start, end, _parse_vol(e.get("vol")), name))
+        events.append((f, start, end, _parse_vol(e.get("vol")) * _sfx_volume_scale(name), name))
 
     events.sort(key=lambda x: x[1])
 
-    # 2) 画面运动峰值对齐：把音效 start 吸附到最近的显著运动峰
-    if align_peaks and events:
+    # 2) 对齐：优先吸附到"对应台词句"，再叠加画面运动峰校正
+    if events and (align_peaks or line_windows):
+        ev_dicts = [{"name": ev[4], "start": ev[1]} for ev in events]
         starts = [ev[1] for ev in events]
-        snapped = align_starts(starts, align_peaks, align_window)
+        new_starts, sources = align_event_starts(ev_dicts, line_windows, align_peaks, align_window)
         if align_debug is not None:
             align_debug["events"] = [
-                {"name": events[k][4], "orig": round(starts[k], 2), "aligned": round(snapped[k], 2)}
+                {"name": events[k][4], "orig": round(starts[k], 2),
+                 "aligned": round(new_starts[k], 2), "source": sources[k]}
                 for k in range(len(events))
             ]
         events = [
-            (events[k][0], snapped[k], events[k][2], events[k][3], events[k][4])
+            (events[k][0], new_starts[k], events[k][2], events[k][3], events[k][4])
             for k in range(len(events))
         ]
         events.sort(key=lambda x: x[1])
@@ -377,11 +510,22 @@ def generate_audio_tracks(project, project_dir: Path, audio_paths: list = None, 
             scene_amb[key] = str(st_path) if st_path.exists() else None
 
     align_report = {}
+    sfx_names = []   # 每镜命中的音效名（供前端展示）
+    amb_names = []   # 每镜对应的环境音描述（命中才有）
     for i, (sc, sh) in enumerate(flat):
         dur = durations[i]
         key = sc.scene_number
 
-        # 画面运动峰值（用于把音效吸附到画面动作时刻）
+        # 记录该镜命中的音效名 / 环境音描述（与生成结果一并登记，供前端展示）
+        sfx_names.append([
+            (e.get("name") or "").strip()
+            for e in (sh.sound_effects or [])
+            if isinstance(e, dict) and _resolve_sfx_asset((e.get("name") or "").strip())
+        ])
+        _amb_txt = sc.ambience or sc.location or ""
+        amb_names.append(_amb_txt if _match_in_text("ambience", _amb_txt) else "")
+
+        # 画面运动峰值（把音效吸附到画面动作时刻）
         peaks = []
         clip = video_paths[i] if video_paths and i < len(video_paths) else None
         if SFX_MOTION_ALIGN and clip and Path(clip).exists():
@@ -389,6 +533,9 @@ def generate_audio_tracks(project, project_dir: Path, audio_paths: list = None, 
                 peaks = find_peaks(motion_curve(clip))
             except Exception:
                 peaks = []
+
+        # 句边界（优先把音效吸附到"对应台词句"的起点，零成本：读已有逐句配音缓存）
+        line_windows = _dialogue_line_windows(project_dir, i, sh) if sh.dialogues else []
 
         # 音效轨（场景首个镜头带转场音效，按场景情绪选型）
         sfx_out = sfx_dir / f"shot_{i:04d}.mp3"
@@ -403,15 +550,20 @@ def generate_audio_tracks(project, project_dir: Path, audio_paths: list = None, 
                     trans = _match_keyword("transition", tk) if tk else None
                     if not trans:
                         trans = _match_keyword("transition", "impact")
-                if peaks:
-                    align_report.setdefault(i, {})["clip"] = Path(clip).name
-                    align_report[i]["peaks"] = [round(t, 2) for t, _ in peaks]
-                    dbg = align_report[i]
-                else:
-                    dbg = None
+                dbg = None
+                if peaks or line_windows:
+                    entry = align_report.setdefault(i, {})
+                    if clip and peaks:
+                        entry["clip"] = Path(clip).name
+                    if peaks:
+                        entry["peaks"] = [round(t, 2) for t, _ in peaks]
+                    if line_windows:
+                        entry["lines"] = [[round(s, 2), round(e, 2), t] for s, e, t in line_windows]
+                    dbg = entry
                 sfx_paths.append(build_shot_sfx_track(
                     sh, sfx_out, transition_file=trans, duration=dur,
-                    align_peaks=peaks or None, align_window=SFX_ALIGN_WINDOW, align_debug=dbg,
+                    align_peaks=peaks or None, align_window=SFX_ALIGN_WINDOW,
+                    align_debug=dbg, line_windows=line_windows or None,
                 ))
         else:
             sfx_paths.append(None)
@@ -435,10 +587,19 @@ def generate_audio_tracks(project, project_dir: Path, audio_paths: list = None, 
         if bgm_out.exists():
             bgm_path = str(bgm_out)
         else:
+            # 先按各场景情绪匹配；匹配不到的场景沿用上一段 BGM（不静音），
+            # 并用第一个匹配到的情绪回填开头，避免整片中途断乐
+            matched = [
+                _match_keyword("bgm", scene_obj[key].bgm or scene_obj[key].mood or "")
+                for key in scene_order
+            ]
+            seed = next((f for f in matched if f), None)
+            last = seed
             segs = []
-            for key in scene_order:
-                sc = scene_obj[key]
-                fname = _match_keyword("bgm", sc.bgm or sc.mood or "")
+            for idx, key in enumerate(scene_order):
+                fname = matched[idx] or last or seed
+                if matched[idx]:
+                    last = matched[idx]
                 segs.append((_asset_path("bgm", fname), scene_dur[key]))
             bgm_path = build_bgm_track(segs, bgm_out)
 
@@ -447,6 +608,8 @@ def generate_audio_tracks(project, project_dir: Path, audio_paths: list = None, 
         "ambience": amb_paths,
         "bgm": bgm_path,
         "durations": durations,
+        "sfx_names": sfx_names,
+        "ambience_name": amb_names,
     }
     (project_dir / "audio_tracks.json").write_text(
         json.dumps(registry, ensure_ascii=False, indent=2, default=str), encoding="utf-8"

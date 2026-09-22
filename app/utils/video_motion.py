@@ -60,35 +60,66 @@ def motion_curve(video_path, fps: int = 10, w: int = 160, h: int = 90, crop_rati
     return curve
 
 
-def find_peaks(curve: list, min_gap: float = 0.3, k: float = 0.6) -> list:
+def find_peaks(curve: list, min_gap: float = 0.6, top_k: int = 3, prom_ratio: float = 0.4) -> list:
     """找显著运动峰值。返回 [(t, energy)]，按时间升序。
-    阈值 = max(0.02, 均值 + k*标准差)，滤掉持续的运镜/噪声，只保留明显凸起。
+
+    针对真实 AI 片段（多为持续/周期性微动 + 运镜）做了收紧：
+    - 先平滑曲线，阈值取 max(0.02, 均值 + 0.8·标准差)
+    - 用"显著度 prominence"（峰高出两侧基线的幅度）过滤周期性小起伏
+    - 只保留最重要的 top_k 个，且两两间隔 >= min_gap
+    - 找不到显著峰则返回空（调用方据此退回台词/剧本时间，宁可不吸也不吸错）
     """
     if not curve or len(curve) < 3:
         return []
-    energies = [e for _, e in curve]
     times = [t for t, _ in curve]
-    n = len(energies)
-    mean = sum(energies) / n
-    var = sum((x - mean) ** 2 for x in energies) / n
-    std = var ** 0.5
-    thr = max(0.02, mean + k * std)
+    raw = [e for _, e in curve]
+    n = len(raw)
 
-    cand = []
+    # 平滑（3 点滑动平均）后统计
+    sm = []
+    for i in range(n):
+        lo = max(0, i - 1)
+        hi = min(n, i + 2)
+        sm.append(sum(raw[lo:hi]) / (hi - lo))
+
+    mean = sum(sm) / n
+    mx = max(sm)
+    if mx <= 1e-6:
+        return []
+    std = (sum((x - mean) ** 2 for x in sm) / n) ** 0.5
+    thr = max(0.02, mean + 0.8 * std)
+    prom_thr = max(0.015, prom_ratio * (mx - mean))
+
+    cands = []
     for i in range(1, n - 1):
-        e = energies[i]
-        if e >= energies[i - 1] and e >= energies[i + 1] and e >= thr:
-            cand.append((times[i], e))
-    if not cand:
+        h = sm[i]
+        if h >= sm[i - 1] and h >= sm[i + 1] and h >= thr:
+            l = i - 1
+            lmin = h
+            while l >= 0 and sm[l] <= h:
+                lmin = min(lmin, sm[l])
+                l -= 1
+            r = i + 1
+            rmin = h
+            while r < n and sm[r] <= h:
+                rmin = min(rmin, sm[r])
+                r += 1
+            prom = h - max(lmin, rmin)
+            if prom >= prom_thr:
+                cands.append((times[i], h, prom))
+
+    if not cands:
         return []
 
-    cand.sort(key=lambda x: -x[1])
+    cands.sort(key=lambda x: -x[2])
     kept = []
-    for t, e in cand:
-        if all(abs(t - kt) >= min_gap for kt, _ in kept):
-            kept.append((t, e))
+    for t, h, _p in cands:
+        if all(abs(t - kt) >= min_gap for kt, _, _ in kept):
+            kept.append((t, h, _p))
+        if len(kept) >= top_k:
+            break
     kept.sort(key=lambda x: x[0])
-    return kept
+    return [(t, h) for t, h, _p in kept]
 
 
 def align_starts(starts: list, peaks: list, window: float = 0.6) -> list:

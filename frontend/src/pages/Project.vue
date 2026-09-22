@@ -74,7 +74,9 @@
       <div class="budget-track">
         <div class="budget-fill" :style="{ width: budgetPct + '%' }"></div>
       </div>
-      <span v-if="budgetWarn" class="budget-hint">接近限额，AI 视频将自动降级为图文卡点模式</span>
+      <span v-if="budgetWarn" class="budget-hint">
+        {{ budgetPct >= 100 ? '已超出限额：继续生成会弹窗确认，费用照常累计' : '接近限额：继续生成会弹窗确认，费用照常累计' }}
+      </span>
     </div>
 
     <!-- 日志面板 -->
@@ -159,16 +161,16 @@
               <p class="text-sm text-dim">{{ char.description }}</p>
             </div>
             <div class="char-views">
-              <div v-if="char.front_image" class="view" @click="lightbox = img(char.front_image)">
-                <img :src="img(char.front_image)" alt="正面" />
+              <div v-if="char.front_image" class="view" @click="lightbox = av(char.front_image)">
+                <img :src="av(char.front_image)" alt="正面" />
                 <span>正面</span>
               </div>
-              <div v-if="char.side_image" class="view" @click="lightbox = img(char.side_image)">
-                <img :src="img(char.side_image)" alt="侧面" />
+              <div v-if="char.side_image" class="view" @click="lightbox = av(char.side_image)">
+                <img :src="av(char.side_image)" alt="侧面" />
                 <span>侧面</span>
               </div>
-              <div v-if="char.back_image" class="view" @click="lightbox = img(char.back_image)">
-                <img :src="img(char.back_image)" alt="背面" />
+              <div v-if="char.back_image" class="view" @click="lightbox = av(char.back_image)">
+                <img :src="av(char.back_image)" alt="背面" />
                 <span>背面</span>
               </div>
             </div>
@@ -184,8 +186,8 @@
         </div>
         <div class="shot-grid">
           <div v-for="(src, i) in shotImages" :key="i" class="shot-card">
-            <div v-if="src" @click="lightbox = img(src)">
-                <img :src="img(src)" :alt="'镜头 ' + (i+1)" />
+            <div v-if="src" @click="lightbox = av(src)">
+                <img :src="av(src)" :alt="'镜头 ' + (i+1)" />
               <div class="shot-label">{{ i + 1 }}</div>
             </div>
             <div v-else class="shot-empty">
@@ -218,11 +220,11 @@
               <div class="audio-players">
                 <div v-if="a.dialogue_audio" class="audio-item">
                   <span class="audio-label">对话</span>
-                  <audio controls :src="img(a.dialogue_audio)" />
+                  <audio controls :src="av(a.dialogue_audio)" />
                 </div>
                 <div v-if="a.narrator_audio" class="audio-item">
                   <span class="audio-label">旁白</span>
-                  <audio controls :src="img(a.narrator_audio)" />
+                  <audio controls :src="av(a.narrator_audio)" />
                 </div>
               </div>
             </div>
@@ -239,7 +241,7 @@
         <div class="video-grid">
           <div v-for="(src, i) in videoPaths" :key="i" class="video-card">
             <div v-if="src" class="video-wrap">
-              <video controls :src="img(src)" preload="metadata" />
+              <video controls :src="av(src)" preload="metadata" />
               <div class="video-label">{{ i + 1 }}</div>
             </div>
             <div v-else class="video-empty">
@@ -267,8 +269,38 @@
         </div>
         <div v-if="audioTracks.bgm" class="audio-item" style="margin-top:10px">
           <span class="audio-label">BGM</span>
-          <audio controls :src="img(audioTracks.bgm)" />
+          <audio controls :src="av(audioTracks.bgm)" />
         </div>
+
+        <!-- 逐镜音轨（可试听 + 显示命中的音效名） -->
+        <details v-if="allShots.length" class="audio-track-list">
+          <summary>逐镜音轨（{{ allShots.length }} 镜）</summary>
+          <div v-for="(item, i) in allShots" :key="i" class="audio-track-row">
+            <div class="at-head">
+              镜头 {{ i + 1 }}<span class="at-scene">（场景 {{ item.sceneNumber }}）</span>
+            </div>
+            <div class="at-cell">
+              <span class="audio-label">音效</span>
+              <template v-if="(audioTracks.sfx || [])[i]">
+                <audio controls :src="av(audioTracks.sfx[i])" />
+                <span v-if="((audioTracks.sfx_names || [])[i] || []).length" class="at-names">
+                  {{ ((audioTracks.sfx_names || [])[i] || []).join('、') }}
+                </span>
+              </template>
+              <span v-else class="at-none">—</span>
+            </div>
+            <div class="at-cell">
+              <span class="audio-label">环境音</span>
+              <template v-if="(audioTracks.ambience || [])[i]">
+                <audio controls :src="av(audioTracks.ambience[i])" />
+                <span v-if="((audioTracks.ambience_name || [])[i])" class="at-names">
+                  {{ ((audioTracks.ambience_name || [])[i]) }}
+                </span>
+              </template>
+              <span v-else class="at-none">—</span>
+            </div>
+          </div>
+        </details>
       </section>
 
       <!-- 最终视频（时间戳版本化，保留历史） -->
@@ -292,8 +324,8 @@
           <div v-for="f in outputFiles" :key="f.name" class="output-item">
             <span class="output-name">{{ f.name }}</span>
             <span class="output-time">{{ fmtTime(f.mtime) }}</span>
-            <a :href="img(f.path)" target="_blank" class="btn btn-ghost btn-xs">播放</a>
-            <a :href="img(f.path)" download class="btn btn-ghost btn-xs">下载</a>
+            <a :href="av(f.path)" target="_blank" class="btn btn-ghost btn-xs">播放</a>
+            <a :href="av(f.path)" download class="btn btn-ghost btn-xs">下载</a>
             <button class="btn btn-danger btn-xs" @click="handleDeleteOutputFile(f.name)">删除</button>
           </div>
         </div>
@@ -430,6 +462,7 @@ const shotImages = ref([])
 const audioPaths = ref([])
 const videoPaths = ref([])
 const audioTracks = ref({})
+const assetVer = ref(0)
 const expandedScenes = reactive({})
 const lightbox = ref(null)
 const logs = ref([])
@@ -493,6 +526,23 @@ const img = (path) => {
   return path
 }
 
+// 拍平剧本为镜头列表（与 audioTracks.sfx / ambience 的镜头顺序一一对应）
+const allShots = computed(() => {
+  const out = []
+  const scenes = project.value?.script?.scenes || []
+  scenes.forEach((sc) => {
+    (sc.shots || []).forEach((sh) => out.push({ sceneNumber: sc.scene_number, shot: sh }))
+  })
+  return out
+})
+
+// 带缓存版本号的静态资源 URL（重跑后强制刷新图片/音频，避免浏览器缓存旧文件）
+const av = (path) => {
+  const u = img(path)
+  if (!u) return ''
+  return `${u}${u.includes('?') ? '&' : '?'}v=${assetVer.value}`
+}
+
 const loadProject = async () => {
   try {
     const { data } = await getProject(route.params.id)
@@ -501,6 +551,7 @@ const loadProject = async () => {
     audioPaths.value = data.audio_paths || []
     videoPaths.value = data.video_paths || []
     audioTracks.value = data.audio_tracks || {}
+    assetVer.value = Date.now()
     await loadOutputs()
   } catch (e) { console.error(e) }
 }
@@ -770,10 +821,11 @@ const runWithBudget = async (fn, label) => {
 
 // 重跑某步：弹窗让用户选择「增量补全」或「清空重建」
 const resetStepApi = {
+  script: deleteScript,
   characters: deleteCharacters,
   shots: deleteShots,
   audio: deleteAudio,
-  videos: deleteVideos,
+  video: deleteVideos,
   compose: deleteOutput,
 }
 
@@ -892,7 +944,7 @@ const handleToggleTts = async (val) => {
     return
   }
   const label = val ? 'TTS 配音' : 'AI 原声拼接'
-  if (!confirm(`切换到「${label}」？\n提示：切换后需删除已生成的音频/视频并重跑，新方案才生效。`)) return
+  if (!confirm(`切换到「${label}」？\n提示：该模式若还没生成视频片段，需要重新生成（消耗视频额度）；已生成的另一种模式片段会保留，不会被删除。`)) return
   try {
     await updateProjectSettings(route.params.id, { use_tts: val })
     await loadProject()
@@ -1540,6 +1592,50 @@ onUnmounted(() => {
 .audio-track-info {
   display: flex;
   gap: 20px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.audio-track-list {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.audio-track-list > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+.audio-track-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.at-head {
+  font-size: 12px;
+  color: var(--text);
+}
+.at-scene {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.at-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.at-cell audio {
+  height: 30px;
+}
+.at-names {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.at-none {
   font-size: 12px;
   color: var(--text-dim);
 }

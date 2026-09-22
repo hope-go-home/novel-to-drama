@@ -105,6 +105,8 @@ REDIS_URL=redis://:123456@localhost:6381/0
 OUTPUT_DIR=./projects
 IMAGE_STYLE=anime
 VIDEO_DURATION=5
+# 生图参考图裁成"头部+肩部"再作参考（避免照抄角色设定图全身站姿/白底构图）
+IMAGE_REF_BUST_CROP=true
 
 # 本地音频素材（音效/环境音/BGM）
 SFX_ENABLED=true
@@ -112,7 +114,7 @@ AMBIENCE_ENABLED=true
 BGM_ENABLED=true
 SFX_VOLUME=0.8
 AMBIENCE_VOLUME=0.4
-BGM_VOLUME=0.12
+BGM_VOLUME=0.22
 BGM_DUCK=true
 DUCK_SFX_AMB=true
 BGM_CROSSFADE=0.4
@@ -122,6 +124,8 @@ SFX_ALIGN_WINDOW=0.6
 ```
 
 > 音频素材放在 `assets/sfx`、`assets/ambience`、`assets/bgm`，映射表在 `assets/audio_map.json`（素材音频不入 git，映射表入库）。
+>
+> 音效对齐：优先吸附到「对应台词句」的起点（从已有逐句配音缓存推导，不额外消耗 TTS），再叠加画面运动峰值校正；对齐结果写入 `projects/{id}/align.json`（peaks / lines / 每个音效的 orig→aligned→source）。
 
 ### 3. 启动服务
 

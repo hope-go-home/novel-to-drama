@@ -10,6 +10,7 @@
       </router-link>
       <nav class="top-nav">
         <router-link to="/" class="nav-link">项目</router-link>
+        <router-link to="/assets" class="nav-link">素材库</router-link>
         <router-link to="/create" class="btn btn-primary btn-sm">新建项目</router-link>
       </nav>
     </header>

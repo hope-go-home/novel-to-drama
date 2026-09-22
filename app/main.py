@@ -5,13 +5,13 @@ import shutil
 import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import asyncio
-from .config import OUTPUT_DIR, ensure_project_dir, DAILY_BUDGET
+from .config import OUTPUT_DIR, ensure_project_dir, DAILY_BUDGET, ASSETS_DIR
 from .models import Project, ProjectCreate, ProjectStatus, Script
 from .utils.logger import add_log, get_logs, clear_logs, logger
 from .utils.event_bus import wait_log_update
@@ -104,6 +104,12 @@ def _load_audio_tracks(project_id: str) -> dict:
     if not reg:
         return {}
     return reg
+
+
+def _load_video_paths(project) -> list:
+    """读取当前声音模式对应的视频片段索引（各模式独立，不跨模式回退）。"""
+    from .engines.video_engine import video_index_filename
+    return _load_json(project.id, video_index_filename(project.use_tts)) or []
 
 
 def _is_cancelled(project_id: str) -> bool:
@@ -269,8 +275,8 @@ async def get_project(project_id: str):
             validated_audio.append(a)
     d["audio_paths"] = validated_audio
     
-    # 检查视频文件是否存在
-    video_paths = _load_json(project_id, "video_paths.json") or []
+    # 检查视频文件是否存在（按当前声音模式读取；缺失回退另一模式）
+    video_paths = _load_video_paths(project)
     d["video_paths"] = [p if p and Path(p).exists() else None for p in video_paths]
 
     # 音频增强轨（音效/环境音/BGM）
@@ -409,7 +415,7 @@ async def delete_script(project_id: str):
     project.status = ProjectStatus.CREATED
     _save_project(project)
     # 删除相关文件
-    for f in ["shot_images.json", "audio_paths.json", "video_paths.json"]:
+    for f in ["shot_images.json", "audio_paths.json", "video_paths.json", "video_paths_orig.json"]:
         p = OUTPUT_DIR / project_id / f
         if p.exists():
             p.unlink()
@@ -471,6 +477,9 @@ async def delete_videos(project_id: str):
     p = OUTPUT_DIR / project_id / "video_paths.json"
     if p.exists():
         p.unlink()
+    p2 = OUTPUT_DIR / project_id / "video_paths_orig.json"
+    if p2.exists():
+        p2.unlink()
     add_log("WARN", "video", "删除全部视频片段", project_id)
     return {"message": "视频片段已删除"}
 
@@ -547,16 +556,20 @@ async def delete_single_shot(project_id: str, index: int):
 
 @app.delete("/api/projects/{project_id}/video/{index}")
 async def delete_single_video(project_id: str, index: int):
-    """删除单个视频片段"""
+    """删除单个视频片段（两种声音模式的该镜片段都删）"""
     _load_project(project_id)
-    clip_path = OUTPUT_DIR / project_id / "video_clips" / f"clip_{index:04d}.mp4"
-    if clip_path.exists():
-        clip_path.unlink()
-    # 更新 video_paths.json
-    videos = _load_json(project_id, "video_paths.json") or []
-    if index < len(videos):
-        videos[index] = None
-        _save_json(project_id, "video_paths.json", videos)
+    from .engines.video_engine import clip_filename
+    clips_dir = OUTPUT_DIR / project_id / "video_clips"
+    for mode in (True, False):
+        cp = clips_dir / clip_filename(index, mode)
+        if cp.exists():
+            cp.unlink()
+    # 更新两个模式的索引
+    for fname in ("video_paths.json", "video_paths_orig.json"):
+        videos = _load_json(project_id, fname)
+        if videos and index < len(videos):
+            videos[index] = None
+            _save_json(project_id, fname, videos)
     add_log("WARN", "video", f"删除视频片段 {index}", project_id)
     return {"message": f"视频片段 {index} 已删除"}
 
@@ -839,7 +852,8 @@ async def _run_video_generation(project_id: str):
         video_paths = await generate_video_clips(all_shots, image_paths, OUTPUT_DIR / project_id, project_id, audio_paths, use_tts=project.use_tts)
         project.status = ProjectStatus.VIDEO_DONE
         _save_project(project)
-        _save_json(project_id, "video_paths.json", video_paths)
+        from .engines.video_engine import video_index_filename
+        _save_json(project_id, video_index_filename(project.use_tts), video_paths)
         ok_count = sum(1 for p in video_paths if p)
         add_log("SUCCESS", "video", f"视频生成完成: {ok_count}/{len(all_shots)} 成功", project_id)
         # 成本记账：按成功视频 × 5 秒估算
@@ -878,7 +892,7 @@ async def _run_audiofx_generation(project_id: str):
         return
     try:
         audio_paths = _load_json(project_id, "audio_paths.json") or []
-        video_paths = _load_json(project_id, "video_paths.json") or []
+        video_paths = _load_video_paths(project)
         generate_audio_tracks(project, OUTPUT_DIR / project_id, audio_paths, video_paths)
     except asyncio.CancelledError:
         add_log("WARN", "audiofx", "生成已停止", project_id)
@@ -926,7 +940,7 @@ async def _run_compose(project_id: str, with_sfx: bool = True, with_ambience: bo
     try:
         all_shots = _get_all_shots(project)
         image_paths = _load_json(project_id, "shot_images.json") or []
-        video_paths = _load_json(project_id, "video_paths.json") or []
+        video_paths = _load_video_paths(project)
         audio_paths = _load_json(project_id, "audio_paths.json") or []
         final_video = await compose_final_video(
             shots=all_shots, shot_image_paths=image_paths,
@@ -1076,7 +1090,8 @@ async def _run_full_pipeline(project_id: str):
             audio_paths = []  # 关闭配音：视频保留原声，不生成 TTS
 
         # Step 5: AI 视频（已有则跳过，失败则用空值）
-        existing_video = _load_json(project_id, "video_paths.json")
+        from .engines.video_engine import video_index_filename
+        existing_video = _load_json(project_id, video_index_filename(project.use_tts))
         # 验证视频文件是否实际存在
         if existing_video:
             valid_video = []
@@ -1101,7 +1116,7 @@ async def _run_full_pipeline(project_id: str):
             except Exception as e:
                 print(f"视频生成失败，跳过: {e}")
                 video_paths = [None] * len(image_paths)
-            _save_json(project_id, "video_paths.json", video_paths)
+            _save_json(project_id, video_index_filename(project.use_tts), video_paths)
             project.status = ProjectStatus.VIDEO_DONE
             _save_project(project)
             await _record_usage(project_id, "video", float(sum(1 for p in video_paths if p) * 5))
@@ -1248,10 +1263,12 @@ async def _run_single_shot_redo(project_id: str, index: int):
     add_log("INFO", "redo", f"单镜头重做开始: 镜头 {index}", project_id)
     try:
         # 1) 清除该镜头缓存（图 / 音频 / 视频 / 音效轨）
+        from .engines.video_engine import clip_filename, video_index_filename
         shot_png = project_dir / "shots" / f"shot_{index:04d}.png"
         shot_png.unlink(missing_ok=True)
-        clip_mp4 = project_dir / "video_clips" / f"clip_{index:04d}.mp4"
-        clip_mp4.unlink(missing_ok=True)
+        clips_dir = project_dir / "video_clips"
+        for _mode in (True, False):
+            (clips_dir / clip_filename(index, _mode)).unlink(missing_ok=True)
         (project_dir / "sfx" / f"shot_{index:04d}.mp3").unlink(missing_ok=True)
         audio_dir = project_dir / "audio"
         for f in audio_dir.glob(f"shot_{index:04d}_*.mp3"):
@@ -1277,7 +1294,7 @@ async def _run_single_shot_redo(project_id: str, index: int):
         # 4) 重生成该镜头视频（其余镜头文件已存在会跳过）
         from .engines.video_engine import generate_video_clips
         video_paths = await generate_video_clips(all_shots, images, project_dir, project_id, _load_json(project_id, "audio_paths.json") or [], use_tts=project.use_tts)
-        _save_json(project_id, "video_paths.json", video_paths)
+        _save_json(project_id, video_index_filename(project.use_tts), video_paths)
         # 5) 重新合成最终视频
         from .engines.compose_engine import compose_final_video
         final_video = await compose_final_video(
@@ -1320,7 +1337,9 @@ async def redo_single_shot(project_id: str, index: int, force: bool = False):
 async def extract_shot_frame(project_id: str, index: int, at: float = 0.0):
     """视频理解层：抽指定镜头视频的某一帧（默认首帧）做质量/内容核验"""
     from .utils.ffmpeg_utils import extract_frame, probe_duration, probe_has_audio
-    clip = OUTPUT_DIR / project_id / "video_clips" / f"clip_{index:04d}.mp4"
+    from .engines.video_engine import clip_filename
+    proj = _load_project(project_id)
+    clip = OUTPUT_DIR / project_id / "video_clips" / clip_filename(index, proj.use_tts)
     if not clip.exists():
         raise HTTPException(status_code=404, detail="该镜头视频不存在")
     out = OUTPUT_DIR / project_id / "output" / f"clip_{index:04d}_frame_{int(at)}.jpg"
@@ -1348,3 +1367,160 @@ async def clear_logs_api():
     """清空日志"""
     clear_logs()
     return {"message": "日志已清空"}
+
+
+# ============ 本地音频素材库管理（音效/环境音/BGM） ============
+
+_AUDIO_CATEGORIES = ("sfx", "ambience", "bgm")
+_MAP_PATH = ASSETS_DIR / "audio_map.json"
+
+
+def _load_audio_map() -> dict:
+    if _MAP_PATH.exists():
+        try:
+            return json.loads(_MAP_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_audio_map(data: dict):
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    _MAP_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 让音频引擎的映射缓存失效，改动立即生效
+    try:
+        from .engines import audio_fx_engine
+        audio_fx_engine._MAP_CACHE = None
+    except Exception:
+        pass
+
+
+def _safe_audio_name(filename: str) -> str:
+    """只保留文件名部分，过滤路径穿越"""
+    name = Path(filename or "").name
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="非法文件名")
+    return name
+
+
+def _cat_dir(category: str) -> Path:
+    if category not in _AUDIO_CATEGORIES:
+        raise HTTPException(status_code=400, detail="未知分类")
+    d = ASSETS_DIR / category
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# 注意：这两个"特殊"路由必须定义在 /{category}/{filename} 之前，否则会被其抢先匹配
+@app.get("/api/assets/map/all")
+async def get_audio_map():
+    """返回完整映射表"""
+    return _load_audio_map()
+
+
+@app.get("/api/assets/sfx_vol/all")
+async def get_sfx_vol():
+    """返回音效音量倍率表"""
+    return _load_audio_map().get("sfx_vol", {}) or {}
+
+
+@app.put("/api/assets/sfx_vol/all")
+async def update_sfx_vol(body: dict):
+    """更新音效音量倍率（name -> 倍率）"""
+    amap = _load_audio_map()
+    vol = amap.setdefault("sfx_vol", {})
+    for k, v in (body or {}).items():
+        if str(k).startswith("_"):
+            continue
+        try:
+            vol[str(k)] = float(v)
+        except Exception:
+            continue
+    _save_audio_map(amap)
+    return {"sfx_vol": vol}
+
+
+@app.get("/api/assets/{category}")
+async def list_assets(category: str):
+    """列出某分类下所有素材及其中文名映射"""
+    d = _cat_dir(category)
+    amap = _load_audio_map().get(category, {}) or {}
+    # 反查：文件名 -> 中文名列表
+    by_file = {}
+    for k, v in amap.items():
+        if k.startswith("_"):
+            continue
+        by_file.setdefault(v, []).append(k)
+    files = []
+    for f in sorted(d.iterdir()):
+        if not f.is_file():
+            continue
+        files.append({
+            "filename": f.name,
+            "names": by_file.get(f.name, []),
+            "size": f.stat().st_size,
+            "url": f"/static/assets/{category}/{f.name}",
+        })
+    return {"category": category, "count": len(files), "files": files}
+
+
+@app.post("/api/assets/{category}")
+async def upload_asset(category: str, file: UploadFile = File(...), name: str = Form("")):
+    """上传素材文件，并可同时登记一个中文名"""
+    d = _cat_dir(category)
+    filename = _safe_audio_name(file.filename)
+    dest = d / filename
+    content = await file.read()
+    dest.write_bytes(content)
+
+    amap = _load_audio_map()
+    amap.setdefault(category, {})
+    key = (name or "").strip()
+    if key and not key.startswith("_"):
+        amap[category][key] = filename
+    _save_audio_map(amap)
+    add_log("SUCCESS", "assets", f"上传素材 {category}/{filename}", "")
+    return {"filename": filename, "name": key, "url": f"/static/assets/{category}/{filename}"}
+
+
+@app.put("/api/assets/{category}/{filename}")
+async def update_asset_names(category: str, filename: str, body: dict):
+    """更新某文件的中文名映射（覆盖该文件的全部别名）"""
+    d = _cat_dir(category)
+    filename = _safe_audio_name(filename)
+    if not (d / filename).exists():
+        raise HTTPException(status_code=404, detail="素材文件不存在")
+    names = body.get("names")
+    if names is None:
+        raise HTTPException(status_code=400, detail="缺少 names")
+    if isinstance(names, str):
+        names = [n for n in names.replace("，", ",").split(",")]
+    names = [str(n).strip() for n in names if str(n).strip() and not str(n).startswith("_")]
+
+    amap = _load_audio_map()
+    cat = amap.setdefault(category, {})
+    # 清掉指向该文件的旧映射，再写入新映射
+    for k in [k for k, v in cat.items() if v == filename]:
+        cat.pop(k, None)
+    for n in names:
+        cat[n] = filename
+    _save_audio_map(amap)
+    return {"filename": filename, "names": names}
+
+
+@app.delete("/api/assets/{category}/{filename}")
+async def delete_asset(category: str, filename: str):
+    """删除素材文件及其映射"""
+    d = _cat_dir(category)
+    filename = _safe_audio_name(filename)
+    target = d / filename
+    if target.exists():
+        target.unlink()
+    amap = _load_audio_map()
+    cat = amap.get(category, {}) or {}
+    for k in [k for k, v in cat.items() if v == filename]:
+        cat.pop(k, None)
+    _save_audio_map(amap)
+    add_log("WARN", "assets", f"删除素材 {category}/{filename}", "")
+    return {"message": "已删除"}
+
